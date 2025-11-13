@@ -1,124 +1,41 @@
 import Layout from "./Layout.jsx";
 
 import Home from "./Home";
-
 import Store from "./Store";
-
 import StreamViewer from "./StreamViewer";
-
-import Subscriptions from "./Subscriptions";
-
-import Rewards from "./Rewards";
-
-import Messages from "./Messages";
-
 import GoLive from "./GoLive";
-
-import Earnings from "./Earnings";
-
 import ProfileSetup from "./ProfileSetup";
-
 import Profile from "./Profile";
-
 import Trending from "./Trending";
-
 import Following from "./Following";
-
-import TrollOfficerApplication from "./TrollOfficerApplication";
-
-import Admin from "./Admin";
-
-
-import Notifications from "./Notifications";
-
-import Disclaimer from "./Disclaimer";
-
-import Safety from "./Safety";
-
-import Privacy from "./Privacy";
-
-import TrollFamilyApplication from "./TrollFamilyApplication";
-
 import BroadcasterApplication from "./BroadcasterApplication";
-
-import OfficerChat from "./OfficerChat";
-
-import TrollFamily from "./TrollFamily";
-
 import PublicProfile from "./PublicProfile";
-
-import Followers from "./Followers";
-
-import PaymentRequired from "./PaymentRequired";
-
-import SupabaseExample from "./SupabaseExample";
 import ManualCoinsPayment from "./ManualCoinsPayment";
-
+import Notifications from "./Notifications";
+import NotificationsPage from "./NotificationsPage";
+import AdminDashboardPage from "./AdminDashboardPage.jsx";
 import LoginPage from "./LoginPage";
 import React, { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getCurrentUserProfile } from "@/api/supabaseHelpers";
 
 import { BrowserRouter as Router, Route, Routes, useLocation } from 'react-router-dom';
 import { supabase } from "@/api/supabaseClient";
 
 const PAGES = {
-    
     Home: Home,
-    
     Store: Store,
-    
     StreamViewer: StreamViewer,
-    
-    Subscriptions: Subscriptions,
-    
-    Rewards: Rewards,
-    
-    Messages: Messages,
-    
     GoLive: GoLive,
-    
-    Earnings: Earnings,
-    
     ProfileSetup: ProfileSetup,
-    
     Profile: Profile,
-    
     Trending: Trending,
-    
     Following: Following,
-    
-    TrollOfficerApplication: TrollOfficerApplication,
-    
-    Admin: Admin,
-    
-    
-    Notifications: Notifications,
-    
-    Disclaimer: Disclaimer,
-    
-    Safety: Safety,
-    
-    Privacy: Privacy,
-    
-    TrollFamilyApplication: TrollFamilyApplication,
-    
     BroadcasterApplication: BroadcasterApplication,
-    
-    OfficerChat: OfficerChat,
-    
-    TrollFamily: TrollFamily,
-    
     PublicProfile: PublicProfile,
-    
-    Followers: Followers,
-    
-    PaymentRequired: PaymentRequired,
-    
-    SupabaseExample: SupabaseExample,
-    
-    
-    
+    ManualCoinsPayment: ManualCoinsPayment,
+    Notifications: Notifications,
+    NotificationsPage: NotificationsPage,
+    Admin: AdminDashboardPage,
 }
 
 function _getCurrentPage(url) {
@@ -138,10 +55,6 @@ function _getCurrentPage(url) {
 function PagesContent() {
     const location = useLocation();
     const queryClient = useQueryClient();
-    const { data: user, isLoading } = useQuery({
-      queryKey: ["currentUser"],
-      queryFn: getCurrentUserProfile,
-    });
     // Track raw auth session separately so we don't block rendering
     const { data: authUser, isLoading: authLoading } = useQuery({
       queryKey: ["authUser"],
@@ -157,7 +70,6 @@ function PagesContent() {
     useEffect(() => {
       const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
         try { queryClient.invalidateQueries({ queryKey: ["authUser"] }); } catch {}
-        try { queryClient.invalidateQueries({ queryKey: ["currentUser"] }); } catch {}
       });
       return () => {
         try { listener.subscription.unsubscribe(); } catch {}
@@ -198,69 +110,22 @@ function PagesContent() {
             <Routes>
                 <Route path="/Login" element={<LoginPage />} />
                 <Route path="/login" element={<LoginPage />} />            
-                
-                    <Route path="/" element={<Home />} />
-                
-                
+                <Route path="/" element={<Home />} />
                 <Route path="/Home" element={<Home />} />
-                
                 <Route path="/Store" element={<Store />} />
-                
                 <Route path="/StreamViewer" element={<StreamViewer />} />
-                
-                <Route path="/Subscriptions" element={<Subscriptions />} />
-                
-                <Route path="/Rewards" element={<Rewards />} />
-                
-                <Route path="/Messages" element={<Messages />} />
-                
                 <Route path="/GoLive" element={<GoLive />} />
-                
-                <Route path="/Earnings" element={<Earnings />} />
-                
                 <Route path="/ProfileSetup" element={<ProfileSetup />} />
-                
                 <Route path="/Profile" element={<Profile />} />
-                
                 <Route path="/Trending" element={<Trending />} />
-                
                 <Route path="/Following" element={<Following />} />
-                
-                <Route path="/TrollOfficerApplication" element={<TrollOfficerApplication />} />
-                
-                <Route path="/Admin" element={<Admin />} />
-                
-                
-                <Route path="/Notifications" element={<Notifications />} />
-                
-                <Route path="/Disclaimer" element={<Disclaimer />} />
-                
-                <Route path="/Safety" element={<Safety />} />
-                
-                <Route path="/Privacy" element={<Privacy />} />
-                
-                <Route path="/TrollFamilyApplication" element={<TrollFamilyApplication />} />
-                
                 <Route path="/BroadcasterApplication" element={<BroadcasterApplication />} />
-                
-                <Route path="/OfficerChat" element={<OfficerChat />} />
-                
-                <Route path="/TrollFamily" element={<TrollFamily />} />
-                
                 <Route path="/PublicProfile" element={<PublicProfile />} />
-                
-                <Route path="/Followers" element={<Followers />} />
-                
-                <Route path="/PaymentRequired" element={<PaymentRequired />} />
-                
-                <Route path="/SupabaseExample" element={<SupabaseExample />} />
-                
-                {/* Manual payment routes (support both cases) */}
                 <Route path="/manual-coins-payment" element={<ManualCoinsPayment />} />
                 <Route path="/ManualCoinsPayment" element={<ManualCoinsPayment />} />
-                
-                
-                
+                <Route path="/Notifications" element={<Notifications />} />
+                <Route path="/NotificationsPage" element={<NotificationsPage />} />
+                <Route path="/Admin" element={<AdminDashboardPage />} />
             </Routes>
         </Layout>
     );
