@@ -1,0 +1,10 @@
+/* Tailwind CSS entrypoint */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Optional: smooth scroll and touch improvements */
+html, body {
+  scroll-behavior: smooth;
+  -webkit-tap-highlight-color: transparent;
+}

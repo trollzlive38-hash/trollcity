@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Shield, Users, DollarSign, FileText, CheckCircle, XCircle, Clock, AlertCircle, Ban, Crown, Coins, Bell, TrendingUp, ShoppingCart, CreditCard, RefreshCw, Loader2, Radio, Eye, Sparkles } from "lucide-react";
   import { toast } from "sonner";
   import SystemHealthPanel from "@/components/admin/SystemHealthPanel";
+  import EarningsConfigPanel from "@/components/admin/EarningsConfigPanel";
 import { format } from "date-fns";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
@@ -19,6 +20,7 @@ import { Link, useNavigate } from "react-router-dom"; // Added useNavigate
 import { createPageUrl } from "@/utils";
 import { getCurrentUserProfile } from "@/api/supabaseHelpers";
 import { executeCommand, UNIVERSAL_COMMAND_PROMPT } from "@/api/commandEngine";
+import { getHighPayingBroadcasters } from "@/api/broadcasterMonetization";
 
 import AccessDenied from "@/components/AccessDenied"; // 👈 create this or use your existing denied UI
 import { useAppConfig } from "@/context/AppConfigContext";
@@ -93,11 +95,11 @@ export default function AdminDashboard() {
 
   // Avoid early returns that change hook order; compute flags instead
   const isAdmin = !!user && getRole(user) === "admin";
+  // Admin override to bypass disabled actions when Supabase is misconfigured
+  const [adminOverrideEnabled, setAdminOverrideEnabled] = useState(false);
   // Effective admin flag: respects UI override to allow admin-only queries/actions
   const effectiveIsAdmin = isAdmin || adminOverrideEnabled;
   const loading = isLoading;
-  // Admin override to bypass disabled actions when Supabase is misconfigured
-  const [adminOverrideEnabled, setAdminOverrideEnabled] = useState(false);
   const effectiveActionsDisabled = actionsDisabled && !(isAdmin && adminOverrideEnabled);
   const [selectedApp, setSelectedApp] = useState(null);
   const [adminNotes, setAdminNotes] = useState("");
@@ -118,6 +120,10 @@ export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState("connections");
   const [userSearchQuery, setUserSearchQuery] = useState("");
   const [deleteHandle, setDeleteHandle] = useState("");
+  // Quick role management UI state
+  const [quickSelectedUserId, setQuickSelectedUserId] = useState(null);
+  const [quickSelectedRole, setQuickSelectedRole] = useState('user');
+  const [quickIsTrollOfficer, setQuickIsTrollOfficer] = useState(false);
 
   // NEW: Per-user purchase history dialog state
   const [viewPurchasesUserId, setViewPurchasesUserId] = useState(null);
@@ -137,6 +143,24 @@ export default function AdminDashboard() {
   // NEW: Payout search state
   const [payoutSearchQuery, setPayoutSearchQuery] = useState("");
   const [payoutUserSuggestions, setPayoutUserSuggestions] = useState([]);
+
+  // NEW: Broadcaster monetization queries
+  const { data: highPayingBroadcasters = [] } = useQuery({
+    queryKey: ['highPayingBroadcasters'],
+    queryFn: async () => {
+      try {
+        const broadcasters = await getHighPayingBroadcasters();
+        return broadcasters;
+      } catch (error) {
+        console.warn('Error fetching high paying broadcasters:', error);
+        return [];
+      }
+    },
+    enabled: getRole(user) === "admin",
+    initialData: [],
+  });
+
+  // Removed youtubeMusicUsers query - function not available
 
   // user is already fetched above
 
@@ -179,6 +203,24 @@ export default function AdminDashboard() {
         : listTable('TrollFamilyApplication', "-created_at"),
     initialData: [],
     enabled: getRole(user) === "admin",
+  });
+
+  // Query for gambling stats
+  const { data: houseStats = {} } = useQuery({
+    queryKey: ["houseGamblingStats"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("gambling_stats")
+        .select("*")
+        .single();
+      if (error) {
+        console.warn("No house stats yet:", error);
+        return { total_wagered: 0, total_paid_out: 0, total_house_profit: 0 };
+      }
+      return data;
+    },
+    enabled: getRole(user) === "admin",
+    refetchInterval: 10000,
   });
 
   // Realtime: refresh Users on new profiles
@@ -315,6 +357,25 @@ export default function AdminDashboard() {
     initialData: [],
     enabled: getRole(user) === "admin",
     refetchInterval: 2000, // Update every 2 seconds for live updates
+  });
+
+  // Query for recent family weekly payouts
+  const { data: recentFamilyPayouts = [] } = useQuery({
+    queryKey: ['familyPayoutsRecent'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('family_weekly_payouts')
+        .select('*')
+        .order('created_date', { ascending: false })
+        .limit(10);
+      if (error) {
+        console.warn('Error fetching family payouts:', error.message);
+        return [];
+      }
+      return data || [];
+    },
+    enabled: getRole(user) === "admin",
+    initialData: [],
   });
 
   // Create a test Troll Family application for verification
@@ -936,13 +997,13 @@ export default function AdminDashboard() {
   };
 
   // Stripe server test: call testStripeConnection edge function
-  const [paypalServerTestResult, setPayPalServerTestResult] = useState(null);
-  const [isRunningPayPalServerTest, setIsRunningPayPalServerTest] = useState(false);
+  const [squareServerTestResult, setSquareServerTestResult] = useState(null);
+  const [isRunningSquareServerTest, setIsRunningSquareServerTest] = useState(false);
   const runPayPalServerTest = async () => {
     setIsRunningPayPalServerTest(true);
     setPayPalServerTestResult(null);
     try {
-      toast.loading('Contacting Stripe server...', { id: 'stripe-server-test' });
+      toast.loading('Contacting Square server...', { id: 'square-server-test' });
       const { data } = await supabase.functions.invoke(
         'teststripeconnection',
         { body: {}, headers: { apikey: import.meta.env.VITE_SUPABASE_ANON_KEY } }
@@ -972,6 +1033,57 @@ export default function AdminDashboard() {
       toast.error(`Stripe server test failed: ${error?.message || 'Request failed'}`);
     } finally {
       setIsRunningPayPalServerTest(false);
+    }
+  };
+
+  // Square server test: proper implementation
+  const runSquareServerTest = async () => {
+    setIsRunningSquareServerTest(true);
+    setSquareServerTestResult(null);
+    try {
+      toast.loading('Testing Square connection...', { id: 'square-server-test' });
+      
+      // Import the Square test function
+      const { testSquareConnection } = await import('@/api/square');
+      const result = await testSquareConnection();
+      
+      toast.dismiss('square-server-test');
+      
+      if (result.success) {
+        setSquareServerTestResult({ 
+          source: 'api', 
+          status: 'connected', 
+          details: { 
+            message: result.message, 
+            environment: result.environment,
+            timestamp: result.timestamp 
+          } 
+        });
+        toast.success('✅ Square connection successful');
+      } else {
+        setSquareServerTestResult({ 
+          source: 'api', 
+          status: 'needs_attention', 
+          details: { 
+            error: result.error, 
+            details: result.details 
+          } 
+        });
+        toast.warning('⚠️ Square connection needs attention');
+      }
+    } catch (error) {
+      console.error('Square server test error:', error);
+      toast.dismiss('square-server-test');
+      setSquareServerTestResult({ 
+        source: 'api', 
+        status: 'not_configured', 
+        details: { 
+          error: error?.message || 'Request failed' 
+        } 
+      });
+      toast.error(`Square test failed: ${error?.message || 'Request failed'}`);
+    } finally {
+      setIsRunningSquareServerTest(false);
     }
   };
 
@@ -1065,6 +1177,28 @@ export default function AdminDashboard() {
     onError: (error) => {
       console.error("Failed to update user role:", error);
       toast.error("Failed to update role");
+    }
+  });
+
+  // Quick profile role/flag updater (used by quick role UI)
+  const quickRoleMutation = useMutation({
+    mutationFn: async ({ userId, role, is_troll_officer }) => {
+      if (!userId) throw new Error('No user selected');
+      const updates = {
+        role: role,
+        user_role: role,
+        is_troll_officer: !!is_troll_officer,
+      };
+      const { error } = await supabase.from('profiles').update(updates).eq('id', userId);
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries(['adminAllUsers']);
+      toast.success('User updated');
+    },
+    onError: (err) => {
+      console.error('Quick role update failed:', err);
+      toast.error(err?.message || 'Failed to update user');
     }
   });
 
@@ -2166,6 +2300,7 @@ export default function AdminDashboard() {
               <Button variant="outline" className="metallic-outline" onClick={() => setActiveTab("families")}>Families</Button>
               <Button variant="outline" className="metallic-outline" onClick={() => setActiveTab("moderation")}>AI Moderation</Button>
               <Button variant="outline" className="metallic-outline" onClick={() => setActiveTab("gambling")}>Gambling</Button>
+              <Button variant="outline" className="metallic-outline" onClick={() => setActiveTab("earnings-settings")}>Earnings Settings</Button>
               <Button variant="outline" className="metallic-outline" onClick={() => setActiveTab("settings")}>Settings</Button>
               <Button variant="outline" className="metallic-outline" onClick={() => setActiveTab("ai")}>AI App Editor</Button>
               <Button variant="outline" className="metallic-outline" onClick={() => setActiveTab("ai-fix")}>AI Fix Assistant</Button>
@@ -2318,6 +2453,41 @@ export default function AdminDashboard() {
                   </CardContent>
                 </Card>
 
+              {/* NEW: Broadcaster Monetization Management */}
+              <Card className="bg-gradient-to-br from-yellow-500/20 to-orange-500/20 border-yellow-500/50 p-6">
+                <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+                  <Crown className="w-6 h-6 text-yellow-400" />
+                  Broadcaster Monetization
+                </h3>
+                
+                <div className="space-y-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <Card className="bg-[#1a1a24] border-[#2a2a3a] p-4">
+                      <h5 className="text-white font-semibold mb-2">High-Paying Trollers ($1000+)</h5>
+                      <div className="space-y-2">
+                        {highPayingBroadcasters.length > 0 ? (
+                          highPayingBroadcasters.slice(0, 3).map(broadcaster => (
+                            <div key={broadcaster.user_id} className="flex items-center justify-between bg-[#0a0a0f] rounded p-2">
+                              <div>
+                                <p className="text-white text-sm font-semibold">@{broadcaster.username || broadcaster.full_name}</p>
+                                <p className="text-yellow-400 text-xs">${(broadcaster.monthly_spending || 0).toLocaleString()} this month</p>
+                              </div>
+                              <Badge className="bg-yellow-500 text-black text-xs">
+                                💎 VIP
+                              </Badge>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-gray-500 text-sm">No VIP broadcasters yet.</p>
+                        )}
+                      </div>
+                    </Card>
+                    
+
+                  </div>
+                </div>
+              </Card>
+
                 {/* Payments & Cashouts */}
                 <Card className="bg-[#1a1a24] border-[#2a2a3a]">
                   <CardHeader>
@@ -2345,37 +2515,37 @@ export default function AdminDashboard() {
                     </div>
 
                     <div className="bg-[#0a0a0f] rounded-lg p-3">
-                      <p className="text-gray-300 text-xs mb-2">Stripe Server Test</p>
+                      <p className="text-gray-300 text-xs mb-2">Square Server Test</p>
                       <div className="flex items-center gap-2 mb-3">
                         <Button
-                          onClick={runPayPalServerTest}
-                          disabled={isRunningPayPalServerTest}
+                          onClick={runSquareServerTest}
+                          disabled={isRunningSquareServerTest}
                           className="bg-blue-600 hover:bg-blue-700"
                         >
-                          {isRunningPayPalServerTest ? (
+                          {isRunningSquareServerTest ? (
                             <>
                               <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                              Contacting Stripe...
+                              Testing Square...
                             </>
                           ) : (
                             <>
                               <CreditCard className="w-4 h-4 mr-2" />
-                              Run Stripe Server Test
+                              Run Square Server Test
                             </>
                           )}
                         </Button>
                         <p className="text-xs text-gray-400">
-                          Verifies Stripe connectivity and credentials via Edge Function.
+                          Verifies Square connectivity and configuration.
                         </p>
                       </div>
-                      {paypalServerTestResult && (
-                        <div className={`rounded-md p-3 ${paypalServerTestResult.status === 'connected' ? 'bg-green-500/10 border border-green-500/30' : 'bg-yellow-500/10 border border-yellow-500/30'}`}>
-                          <p className="text-white font-semibold text-sm">{(paypalServerTestResult.status || '').toUpperCase()}</p>
+                      {squareServerTestResult && (
+                        <div className={`rounded-md p-3 ${squareServerTestResult.status === 'connected' ? 'bg-green-500/10 border border-green-500/30' : 'bg-yellow-500/10 border border-yellow-500/30'}`}>
+                          <p className="text-white font-semibold text-sm">{(squareServerTestResult.status || '').toUpperCase()}</p>
                           <p className="text-gray-300 text-xs">
-                            {paypalServerTestResult.details?.message || paypalServerTestResult.details?.error}
+                            {squareServerTestResult.details?.message || squareServerTestResult.details?.error}
                           </p>
-                          {paypalServerTestResult.details?.mode && (
-                            <p className="text-gray-400 text-[11px] mt-1">Mode: {paypalServerTestResult.details.mode}</p>
+                          {squareServerTestResult.details?.environment && (
+                            <p className="text-gray-400 text-[11px] mt-1">Environment: {squareServerTestResult.details.environment}</p>
                           )}
                           {paypalServerTestResult.status !== 'connected' && paypalServerTestResult.details?.raw && (
                             <pre className="mt-2 text-[11px] text-gray-300 bg-black/20 p-2 rounded overflow-x-auto">{JSON.stringify(paypalServerTestResult.details.raw, null, 2)}</pre>
@@ -2562,6 +2732,20 @@ export default function AdminDashboard() {
               <div className="mt-6">
                 <SystemHealthPanel />
               </div>
+            </div>
+          </TabsContent>
+
+          {/* Earnings Settings Tab */}
+          <TabsContent value="earnings-settings">
+            <div className="space-y-6">
+              <Card className="bg-[#1a1a24] border-[#2a2a3a] p-6">
+                <CardHeader>
+                  <CardTitle className="text-white">Earnings Settings</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <EarningsConfigPanel currentUser={user} />
+                </CardContent>
+              </Card>
             </div>
           </TabsContent>
 
@@ -3193,6 +3377,44 @@ export default function AdminDashboard() {
               </Card>
           </TabsContent>
 
+          {/* Families & Payouts Tab */}
+          <TabsContent value="families">
+            <Card className="bg-[#1a1a24] border-[#2a2a3a] p-6">
+              <h3 className="text-xl font-bold text-white mb-4">Troll Family Weekly Payouts</h3>
+              <p className="text-gray-400 text-sm mb-6">Every Friday, the top Troll Family (by gifts received) earns $50 split among members. View payouts and manually trigger the generation below.</p>
+              
+              <div className="space-y-6">
+                <div className="flex gap-2">
+                  <Button onClick={() => navigate('/FamilyPayouts')} className="bg-purple-600 hover:bg-purple-700">View Full Payouts Page</Button>
+                </div>
+
+                <Card className="bg-[#0a0a0f] border-[#2a2a3a] p-4">
+                  <h4 className="text-lg font-semibold text-white mb-3">Recent Family Payouts</h4>
+                  <div className="space-y-2 max-h-96 overflow-y-auto">
+                    {(recentFamilyPayouts || []).length === 0 ? (
+                      <p className="text-gray-400 text-sm">No payouts yet</p>
+                    ) : (
+                      recentFamilyPayouts.map(p => (
+                        <div key={`${p.family_id}-${p.created_date}`} className="flex items-center justify-between p-3 bg-[#1a1a24] rounded border border-[#2a2a3a]">
+                          <div>
+                            <p className="font-semibold text-white">{p.family_name}</p>
+                            <p className="text-xs text-gray-400">
+                              {new Date(p.week_start).toLocaleDateString()} - {new Date(p.week_end).toLocaleDateString()}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-yellow-400 font-bold">${p.payout_per_member}</p>
+                            <p className="text-xs text-gray-400">{p.payout_amount_total} total</p>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </Card>
+              </div>
+            </Card>
+          </TabsContent>
+
           {/* Users Tab (renamed from Officers) */}
           <TabsContent value="users">
             <Card className="bg-[#1a1a24] border-[#2a2a3a] p-6">
@@ -3226,6 +3448,44 @@ export default function AdminDashboard() {
                       Clear
                     </Button>
                   )}
+                </div>
+                {/* Quick Role Management */}
+                <div className="ml-4">
+                  <Card className="bg-[#0b0b10] border-[#2a2a3a] p-3">
+                    <p className="text-sm text-white font-semibold mb-2">Quick Role Management</p>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={quickSelectedUserId || ''}
+                        onChange={(e) => setQuickSelectedUserId(e.target.value || null)}
+                        className="bg-[#0a0a0f] border border-[#2a2a3a] text-white px-2 py-1 rounded w-52"
+                      >
+                        <option value="">Select user...</option>
+                        {displayUsers.slice(0, 50).map(u => (
+                          <option key={u.id} value={u.id}>{`@${u.username || u.email || u.id}`}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={quickSelectedRole}
+                        onChange={(e) => setQuickSelectedRole(e.target.value)}
+                        className="bg-[#0a0a0f] border border-[#2a2a3a] text-white px-2 py-1 rounded"
+                      >
+                        <option value="user">User</option>
+                        <option value="moderator">Moderator</option>
+                        <option value="troll_officer">Troll Officer</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                      <label className="flex items-center gap-2 text-sm text-gray-300">
+                        <input type="checkbox" checked={quickIsTrollOfficer} onChange={(e) => setQuickIsTrollOfficer(e.target.checked)} />
+                        Troll Officer Flag
+                      </label>
+                      <Button size="sm" className="bg-green-600 hover:bg-green-700" onClick={() => {
+                        if (!quickSelectedUserId) { toast.error('Select a user'); return; }
+                        quickRoleMutation.mutate({ userId: quickSelectedUserId, role: quickSelectedRole, is_troll_officer: quickIsTrollOfficer });
+                      }} disabled={quickRoleMutation.isLoading}>
+                        Apply
+                      </Button>
+                    </div>
+                  </Card>
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
@@ -4380,11 +4640,51 @@ export default function AdminDashboard() {
             <div className="space-y-6">
               <div className="bg-purple-500/10 border border-purple-500/30 rounded-lg p-4 mb-6">
                 <p className="text-purple-300 text-sm font-bold mb-2">
-                  🎲 <strong>Gambling/Entertainment System</strong>
+                  🎲 <strong>Gambling/Casino System</strong>
                 </p>
                 <p className="text-purple-200 text-xs">
-                  Monitor coin conversions, game activity, and ensure legal compliance. All coins have no cash value and are for entertainment only.
+                  Real-time gambling statistics: payouts, house edge, user performance. Only paid coins allowed for betting. View /Gamble page or manage from here.
                 </p>
+              </div>
+
+              {/* Gambling Statistics Summary */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <Card className="bg-[#1a1a24] border-[#2a2a3a]">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-white text-sm font-semibold">Total Wagered</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-3xl font-bold text-yellow-400">{houseStats?.total_wagered || 0}</p>
+                    <p className="text-gray-400 text-xs mt-1">All-time bets</p>
+                  </CardContent>
+                </Card>
+                <Card className="bg-[#1a1a24] border-[#2a2a3a]">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-white text-sm font-semibold">Total Paid Out</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-3xl font-bold text-green-400">{houseStats?.total_paid_out || 0}</p>
+                    <p className="text-gray-400 text-xs mt-1">Winning payouts</p>
+                  </CardContent>
+                </Card>
+                <Card className="bg-[#1a1a24] border-[#2a2a3a]">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-white text-sm font-semibold">House Profit</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-3xl font-bold text-purple-400">{houseStats?.total_house_profit || 0}</p>
+                    <p className="text-gray-400 text-xs mt-1">House edge</p>
+                  </CardContent>
+                </Card>
+                <Card className="bg-[#1a1a24] border-[#2a2a3a]">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-white text-sm font-semibold">Win Rate</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-3xl font-bold text-blue-400">10%</p>
+                    <p className="text-gray-400 text-xs mt-1">Expected odds</p>
+                  </CardContent>
+                </Card>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

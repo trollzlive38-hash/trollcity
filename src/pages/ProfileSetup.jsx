@@ -407,6 +407,7 @@ export default function ProfileSetupPage() {
             </div>
 
             <Button
+              type="button"
               onClick={handleNext}
               className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 py-6 text-lg"
               disabled={isCheckingUsername || !!usernameError}
@@ -420,6 +421,7 @@ export default function ProfileSetupPage() {
         {step === 2 && (
           <div className="space-y-6">
             <Button
+              type="button"
               variant="ghost"
               onClick={() => setStep(1)}
               className="text-gray-400 hover:text-white mb-4"

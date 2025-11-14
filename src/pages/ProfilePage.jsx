@@ -33,6 +33,9 @@ export default function ProfilePage() {
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState({});
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+  const [selectedAvatarFile, setSelectedAvatarFile] = useState(null);
+  const [avatarPreview, setAvatarPreview] = useState("");
+  const [lastUploadDebug, setLastUploadDebug] = useState(null);
   const [verificationCode, setVerificationCode] = useState("");
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState("");
   const [paymentDetails, setPaymentDetails] = useState("");
@@ -246,18 +249,19 @@ export default function ProfilePage() {
 
   const updatePaymentMethodMutation = useMutation({
     mutationFn: async ({ details }) => {
+      // Temporarily lock payment method to CashApp
       const { error } = await supabase
         .from('profiles')
         .update({
-          payment_method: 'stripe',
-          payment_email: details,
+          payment_method: 'cashapp',
+          cashapp_handle: details,
         })
         .eq('id', user.id);
       if (error) throw error;
     },
     onSuccess: () => {
       queryClient.invalidateQueries(['currentUser']);
-      toast.success('Payment method updated to Stripe');
+      toast.success('Payment method updated to CashApp');
       setSelectedPaymentMethod('');
       setPaymentDetails('');
     },
@@ -309,6 +313,7 @@ export default function ProfilePage() {
     }
   });
 
+  // When a file is selected, store preview and file; upload will occur when user hits "Upload"
   const handleAvatarUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -318,22 +323,96 @@ export default function ProfilePage() {
       return;
     }
 
-    if (file.size > 5 * 1024 * 1024) {
-      toast.error('Image must be less than 5MB');
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error('Image must be less than 10MB');
       return;
     }
 
+    setSelectedAvatarFile(file);
+    const reader = new FileReader();
+    reader.onloadend = () => setAvatarPreview(reader.result);
+    reader.readAsDataURL(file);
+  };
+
+  // Crop image to square center and resize to 512x512, return blob
+  const cropImageToSquareBlob = (dataUrl, size = 512) => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        // center-crop to square
+        const minSide = Math.min(img.width, img.height);
+        const sx = (img.width - minSide) / 2;
+        const sy = (img.height - minSide) / 2;
+        try {
+          ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, size, size);
+          canvas.toBlob((blob) => {
+            if (blob) resolve(blob);
+            else reject(new Error('Canvas toBlob failed'));
+          }, 'image/jpeg', 0.9);
+        } catch (err) {
+          reject(err);
+        }
+      };
+      img.onerror = (e) => reject(new Error('Failed to load image'));
+      img.src = dataUrl;
+    });
+  };
+
+  const performAvatarUpload = async () => {
+    if (!selectedAvatarFile) return;
     try {
       setIsUploadingAvatar(true);
-      const { file_url } = await supabase.integrations.Core.UploadFile({ file, bucket: 'avatars' });
+      // create data URL from file
+      const reader = new FileReader();
+      const dataUrl = await new Promise((res, rej) => {
+        reader.onloadend = () => res(reader.result);
+        reader.onerror = rej;
+        reader.readAsDataURL(selectedAvatarFile);
+      });
+
+      const blob = await cropImageToSquareBlob(dataUrl, 512);
+      const file = new File([blob], `avatar_${user.id}_${Date.now()}.jpg`, { type: 'image/jpeg' });
+
+      // Upload file via local integration helper
+  const uploadResult = await supabase.integrations.Core.UploadFile({ file, bucket: 'avatars' });
+  console.info('Upload result', uploadResult);
+  // store debug info for UI inspection when needed
+  try { setLastUploadDebug(prev => ({ ...prev, uploadResult })); } catch {}
+
+      // Support both { file_url } and { bucket, path } responses from integrations
+      let file_url = uploadResult?.file_url;
+      if (!file_url && uploadResult?.bucket && uploadResult?.path) {
+        try {
+          const { data: pub } = await supabase.storage.from(uploadResult.bucket).getPublicUrl(uploadResult.path);
+          file_url = pub?.publicUrl || null;
+        } catch (err) {
+          console.warn('Failed to resolve public url from storage:', err?.message || err);
+        }
+      }
+
+      if (!file_url) {
+        // Provide actionable message when we couldn't obtain a public URL
+        throw new Error('Upload succeeded but public URL could not be resolved. Check storage bucket visibility and CORS.');
+      }
+
       const { error } = await supabase
         .from('profiles')
         .update({ avatar: file_url })
         .eq('id', user.id);
+      console.info('Profile update result for avatar', { avatar: file_url, error });
+      try { setLastUploadDebug(prev => ({ ...prev, profileUpdate: { avatar: file_url, error } })); } catch {}
       if (error) throw error;
       queryClient.invalidateQueries(['currentUser']);
+      setSelectedAvatarFile(null);
+      setAvatarPreview("");
       toast.success('Avatar updated!');
     } catch (error) {
+      console.error('Avatar upload failed', error);
       toast.error(error.message || 'Failed to upload avatar');
     } finally {
       setIsUploadingAvatar(false);
@@ -393,7 +472,9 @@ export default function ProfilePage() {
         <Card className="bg-[#1a1a24] border-[#2a2a3a] p-6">
           <div className="flex flex-col items-center gap-4">
             <div className="relative">
-              {user.avatar ? (
+              {avatarPreview ? (
+                <img src={avatarPreview} alt="Avatar preview" className="w-24 h-24 rounded-full object-cover" />
+              ) : user.avatar ? (
                 <img src={user.avatar} alt={user.username} className="w-24 h-24 rounded-full object-cover" />
               ) : (
                 <div className="w-24 h-24 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center">
@@ -401,9 +482,21 @@ export default function ProfilePage() {
                 </div>
               )}
               <input ref={avatarInputRef} type="file" accept="image/*" onChange={handleAvatarUpload} className="hidden" />
-              <Button size="icon" onClick={() => avatarInputRef.current?.click()} disabled={isUploadingAvatar} className="absolute bottom-0 right-0 rounded-full bg-purple-600 hover:bg-purple-700">
-                <Camera className="w-4 h-4" />
-              </Button>
+              <div className="absolute bottom-0 right-0 flex gap-2">
+                <Button size="icon" onClick={() => avatarInputRef.current?.click()} disabled={isUploadingAvatar} className="rounded-full bg-purple-600 hover:bg-purple-700">
+                  <Camera className="w-4 h-4" />
+                </Button>
+                {selectedAvatarFile && (
+                  <>
+                    <Button size="icon" onClick={performAvatarUpload} disabled={isUploadingAvatar} className="rounded-full bg-green-600 hover:bg-green-700">
+                      <Save className="w-4 h-4" />
+                    </Button>
+                    <Button size="icon" onClick={() => { setSelectedAvatarFile(null); setAvatarPreview(""); }} disabled={isUploadingAvatar} className="rounded-full bg-red-600 hover:bg-red-700">
+                      <X className="w-4 h-4" />
+                    </Button>
+                  </>
+                )}
+              </div>
             </div>
 
             <div className="text-center">
@@ -417,6 +510,15 @@ export default function ProfilePage() {
             </div>
           </div>
         </Card>
+
+        {/* Debug panel - visible when ?debug=1 is in the URL */}
+        {typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1' && (
+          <Card className="bg-[#121218] border-[#2a2a3a] p-4">
+            <h3 className="text-white font-semibold mb-2">Upload Debug</h3>
+            <pre className="text-xs text-gray-200 overflow-auto max-h-48 p-2 bg-black/40 rounded">{JSON.stringify(lastUploadDebug, null, 2)}</pre>
+            <p className="text-gray-400 text-sm mt-2">If empty, perform an upload and press Save to populate this panel. Copy the JSON and paste it here for help diagnosing.</p>
+          </Card>
+        )}
 
         {/* Profile Info - Collapsible */}
         <Collapsible open={openSections.profile} onOpenChange={() => toggleSection('profile')}>
@@ -433,7 +535,7 @@ export default function ProfilePage() {
                 {!isEditing ? (
                   <>
                     {user.bio && <p className="text-gray-300 text-sm">{user.bio}</p>}
-                    <Button onClick={() => { setIsEditing(true); setEditData({ bio: user.bio || '', username: user.username || '' }); }} className="w-full bg-purple-600 hover:bg-purple-700">
+                    <Button type="button" onClick={() => { setIsEditing(true); setEditData({ bio: user.bio || '', username: user.username || '' }); }} className="w-full bg-purple-600 hover:bg-purple-700">
                       <Edit className="w-4 h-4 mr-2" />Edit Profile
                     </Button>
                   </>

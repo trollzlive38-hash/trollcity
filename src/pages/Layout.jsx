@@ -29,10 +29,11 @@ import { Badge } from "@/components/ui/badge";
 import { supabase } from "@/api/supabaseClient";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import toast from 'react-hot-toast';
+import UserBadges from "@/components/UserBadges";
 
 function SidebarContentComponent({ user }) {
   const location = useLocation();
-  const { setOpenMobile } = useSidebar();
+  const { openMobile, setOpenMobile } = useSidebar();
   const [openSections, setOpenSections] = useState({
     main: true,
     discover: true,
@@ -40,6 +41,24 @@ function SidebarContentComponent({ user }) {
     profile: true,
     admin: true
   });
+
+  // Debug user information
+  useEffect(() => {
+    if (user) {
+      console.log('🔍 Layout User Debug:', {
+        role: user.role,
+        is_admin: user.is_admin,
+        username: user.username,
+        full_name: user.full_name,
+        user_metadata: user.user_metadata,
+        raw_user: user,
+        pathname: location.pathname,
+        homePath: createPageUrl("Home"),
+        isHomePage: location.pathname === createPageUrl("Home"),
+        shouldShowSidebar: user && user.id
+      });
+    }
+  }, [user, location.pathname]);
   const [latestGift, setLatestGift] = useState(null);
   const queryClient = useQueryClient();
 
@@ -178,8 +197,6 @@ function SidebarContentComponent({ user }) {
 
   const monetizationNavItems = [
     { title: "Store", url: createPageUrl("Store"), icon: ShoppingBag },
-    { title: "Subscriptions", url: createPageUrl("Subscriptions"), icon: Crown },
-    { title: "Daily Rewards", url: createPageUrl("Rewards"), icon: Calendar },
     { title: "Earnings", url: createPageUrl("Earnings"), icon: DollarSign },
   ];
 
@@ -189,7 +206,6 @@ function SidebarContentComponent({ user }) {
 
   const adminNavItems = [
     { title: "Admin Dashboard", url: createPageUrl("Admin"), icon: Shield },
-    { title: "T-O Command", url: createPageUrl("OfficerChat"), icon: Swords },
     { title: "Troll Officer App", url: createPageUrl("TrollOfficerApplication"), icon: Swords },
     { title: "Troll Family App", url: createPageUrl("TrollFamilyApplication"), icon: Users },
   ];
@@ -220,7 +236,7 @@ function SidebarContentComponent({ user }) {
   );
 
   return (
-    <Sidebar className="border-r">
+    <Sidebar className="border-r w-64 md:w-72 shrink-0 hidden md:block">
       <SidebarHeader className="border-b p-6" style={{ borderColor: 'var(--border)' }}>
         <div className="flex flex-col gap-4">
           <div className="flex items-center gap-3">
@@ -274,10 +290,7 @@ function SidebarContentComponent({ user }) {
             <CollapsibleContent>
               <SidebarGroupContent>
                 <SidebarMenu>
-                  {renderNavItems([
-                    { title: "Trending", url: createPageUrl("Trending"), icon: TrendingUp },
-                    { title: "Troll Families", url: createPageUrl("TrollFamily"), icon: Users },
-                  ])}
+                  {renderNavItems(discoverNavItems)}
                 </SidebarMenu>
               </SidebarGroupContent>
             </CollapsibleContent>
@@ -368,7 +381,7 @@ function SidebarContentComponent({ user }) {
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm text-gray-400">Level & Tier</span>
                 </div>
-                <div className="flex items-center gap-2">
+                <div>
                   <div className={`text-2xl font-bold bg-gradient-to-r ${tierInfo.color} bg-clip-text text-transparent`}>
                     {userLevel}
                   </div>
@@ -400,10 +413,17 @@ function SidebarContentComponent({ user }) {
                 </div>
               )}
               <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm truncate text-gray-200">
-                  @{user.username || "NoUsername"}
+                <div className="flex items-center gap-2">
+                  <p className="font-medium text-sm truncate text-gray-200">
+                    @{user.username || user.user_metadata?.user_name || 'NoUsername'}
+                  </p>
+                  <UserBadges user={user} size="sm" />
+                </div>
+
+                <p className="text-xs text-gray-400 truncate">{user.email || user.user_metadata?.email || ''}</p>
+                <p className="text-xs text-gray-400 truncate">
+                  Level {userLevel} • Status: {user.is_banned ? 'Banned' : (user.role === 'admin' || user.is_admin) ? 'Admin' : user.is_troll_officer ? 'Troll Officer' : user.is_og ? 'OG' : 'Member'}
                 </p>
-                <p className="text-xs text-gray-400 truncate">{user.email}</p>
               </div>
             </div>
             <Button
@@ -416,7 +436,24 @@ function SidebarContentComponent({ user }) {
             </Button>
           </div>
         ) : (
-          <div className="text-sm text-gray-400">Loading...</div>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 flex items-center justify-center shadow-lg shadow-emerald-500/30">
+                <span className="text-xl font-bold text-white">T</span>
+              </div>
+              <div className="flex flex-col">
+                <p className="font-semibold text-sm text-white">Welcome</p>
+                <p className="text-xs text-gray-400">Log in to personalize TrollCity</p>
+              </div>
+            </div>
+            <Button
+              onClick={() => supabase.auth.redirectToLogin()}
+              size="sm"
+              className="bg-emerald-500 hover:bg-emerald-600 text-black"
+            >
+              Login
+            </Button>
+          </div>
         )}
       </SidebarFooter>
     </Sidebar>
@@ -426,6 +463,7 @@ function SidebarContentComponent({ user }) {
 export default function Layout({ children }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const { data: user } = useQuery({
     queryKey: ['currentUser'],
@@ -433,6 +471,16 @@ export default function Layout({ children }) {
     retry: false,
     refetchInterval: 10000, // FIXED: 10 seconds to prevent rate limits
     staleTime: 5000,
+  });
+
+  const { data: authSession } = useQuery({
+    queryKey: ['authSession'],
+    queryFn: async () => {
+      const { data } = await supabase.auth.getUser();
+      return data?.user || null;
+    },
+    retry: false,
+    staleTime: 1000,
   });
 
   useEffect(() => {
@@ -443,6 +491,14 @@ export default function Layout({ children }) {
       const currentPath = window.location.hash.replace('#/', '');
 
       if (user.is_banned) {
+        if (currentPath !== 'PaymentRequired') {
+          navigate(paymentRequiredUrl);
+        }
+        return;
+      }
+
+      // Check if user is kicked
+      if (user.is_kicked) {
         if (currentPath !== 'PaymentRequired') {
           navigate(paymentRequiredUrl);
         }
@@ -485,6 +541,15 @@ export default function Layout({ children }) {
       .then(() => console.log('✅ PWA Service Worker registered'))
       .catch((error) => console.warn('❌ Service Worker registration failed:', error?.message || error));
   }, []);
+
+  // Debug sidebar visibility
+  const isLoggedIn = (user && user.id) || (authSession && authSession.id);
+  
+  console.log('🔍 Sidebar Visibility Debug:', {
+    pathname: location.pathname,
+    user: user ? { id: user.id, username: user.username } : null,
+    isLoggedIn
+  });
 
   return (
     <SidebarProvider>
@@ -589,7 +654,10 @@ export default function Layout({ children }) {
       `}</style>
 
       <div className="min-h-screen flex w-full">
-        <SidebarContentComponent user={user} />
+        {/* Show sidebar for all logged-in users on all pages */}
+        {isLoggedIn && (
+          <SidebarContentComponent user={user || authSession} />
+        )}
 
         <main className="flex-1 flex flex-col overflow-y-auto">
           <header className="border-b px-6 py-4 md:hidden neon-border-green" style={{ background: 'linear-gradient(90deg, rgba(26, 15, 20, 0.95) 0%, rgba(15, 26, 15, 0.95) 100%)' }}>

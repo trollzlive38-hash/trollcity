@@ -70,6 +70,23 @@ function buildSupabaseStub() {
     auth: {
       getUser: async () => ({ data: { user: null }, error: new Error("Supabase not configured") }),
       signOut: async () => ({ error: null }),
+      // Provide a safe no-op auth.me that returns null
+      me: async () => null,
+      // Provide a redirect helper used by pages to route to login
+      redirectToLogin: () => {
+        try {
+          if (typeof window !== "undefined") {
+            window.location.href = "/Login";
+          }
+        } catch (_) {}
+      },
+      onAuthStateChange: (_cb) => ({
+        data: {
+          subscription: {
+            unsubscribe: () => {}
+          }
+        }
+      }),
     },
     from: () => makeQuery(),
     rpc: async () => ({ data: null, error: new Error("Supabase not configured") }),
@@ -104,6 +121,36 @@ if (supabaseUrl && supabaseAnonKey) {
     },
   });
   client.__isConfigured = true;
+  // Attach convenience helpers expected by the app
+  try {
+    client.auth.me = async () => {
+      try {
+        const { data: auth } = await client.auth.getUser();
+        const userId = auth?.user?.id;
+        if (!userId) return null;
+        const { data, error } = await client
+          .from('profiles')
+          .select('*')
+          .eq('id', userId)
+          .limit(1)
+          .single();
+        if (error) {
+          console.error('Error fetching profile:', error);
+          return { id: userId, is_admin: false, level: 1 };
+        }
+        return data || { id: userId, is_admin: false, level: 1 };
+      } catch (_) {
+        return null;
+      }
+    };
+    client.auth.redirectToLogin = () => {
+      try {
+        if (typeof window !== 'undefined') {
+          window.location.href = '/Login';
+        }
+      } catch (_) {}
+    };
+  } catch (_) {}
   try {
     console.info("[Supabase] URL:", supabaseUrl);
     const fnUrl = normalizeFunctionsUrl(supabaseFunctionsUrl, supabaseUrl);

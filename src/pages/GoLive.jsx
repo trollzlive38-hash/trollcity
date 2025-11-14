@@ -46,6 +46,14 @@ export default function GoLivePage() {
     streamMode: "solo",
     maxParticipants: 1,
   });
+
+  const categories = [
+    { id: 'all', label: 'All' },
+    { id: 'gaming', label: '🎮 Gaming' },
+    { id: 'music', label: '🎵 Music' },
+    { id: 'talk', label: '💬 Just Chatting' },
+    { id: 'creative', label: '🎨 Creative' },
+  ];
   const [isLive, setIsLive] = useState(false);
   const [currentStream, setCurrentStream] = useState(null);
   const [viewerCount, setViewerCount] = useState(0);
@@ -484,14 +492,25 @@ export default function GoLivePage() {
 
       // Normalize common shapes returned by different implementations
       const appId = tokenData?.appId ?? tokenData?.agoraAppId ?? import.meta.env.VITE_AGORA_APP_ID;
-      const token = tokenData?.token ?? tokenData?.rtcToken ?? tokenData?.data?.token ?? null;
+      const tokenCandidates = [
+        tokenData?.token,
+        tokenData?.rtcToken,
+        tokenData?.data?.token,
+        tokenData?.data?.rtcToken,
+        import.meta.env.VITE_AGORA_DEV_TOKEN || null,
+      ];
+      const token = tokenCandidates.find(Boolean) ?? null;
       const uid = tokenData?.uid ?? tokenData?.userId ?? tokenData?.data?.uid ?? (user?.id || 1);
 
       if (!token) {
-        toast.dismiss('stream-setup');
-        toast.error('Missing Agora token from server. Ensure generateagoratoken is deployed and responding.');
-        setIsStartingStream(false);
-        return;
+        const allowNoToken = (import.meta.env.VITE_AGORA_ALLOW_NO_TOKEN ?? 'false') === 'true';
+        if (!allowNoToken) {
+          toast.dismiss('stream-setup');
+          const keys = Object.keys(tokenData || {});
+          toast.error(`Missing Agora token from server. Expected 'token' or 'rtcToken'. Received keys: ${JSON.stringify(keys)}`);
+          setIsStartingStream(false);
+          return;
+        }
       }
       if (!appId) {
         toast.dismiss('stream-setup');
@@ -595,6 +614,25 @@ export default function GoLivePage() {
       setCurrentStream(stream);
       setIsLive(true);
       setIsStartingStream(false);
+      // Notify followers that the stream is live
+      try {
+        const { data: followers = [] } = await supabase
+          .from('follows')
+          .select('follower_id')
+          .eq('following_id', user.id);
+        if (Array.isArray(followers) && followers.length > 0) {
+          const notifRows = followers.map(f => ({
+            user_id: f.follower_id,
+            type: 'stream_live',
+            title: 'Stream Live',
+            message: `${user.username || user.full_name} is live: ${stream.title}`,
+            link_url: `${createPageUrl('StreamViewer')}?id=${stream.id}`,
+            is_read: false,
+            created_date: new Date().toISOString(),
+          }));
+          await supabase.from('notifications').insert(notifRows).catch(() => {});
+        }
+      } catch (_) {}
       
       setTimeout(() => {
         const localPlayer = document.getElementById('local-player');
@@ -684,6 +722,25 @@ export default function GoLivePage() {
         setCurrentStream(stream);
         setIsLive(true);
         setIsStartingStream(false);
+        // Notify followers in multi stream too
+        try {
+          const { data: followers = [] } = await supabase
+            .from('follows')
+            .select('follower_id')
+            .eq('following_id', user.id);
+          if (Array.isArray(followers) && followers.length > 0) {
+            const notifRows = followers.map(f => ({
+              user_id: f.follower_id,
+              type: 'stream_live',
+              title: 'Stream Live',
+              message: `${user.username || user.full_name} is live: ${stream.title}`,
+              link_url: `${createPageUrl('StreamViewer')}?id=${stream.id}`,
+              is_read: false,
+              created_date: new Date().toISOString(),
+            }));
+            await supabase.from('notifications').insert(notifRows).catch(() => {});
+          }
+        } catch (_) {}
 
         if (socketRef.current) socketRef.current.emit('join-stream-room', { streamId: stream.id, maxParticipants: streamConfig.maxParticipants });
 
@@ -902,7 +959,7 @@ export default function GoLivePage() {
       <div className="min-h-screen bg-[#0a0a0f] flex items-center justify-center p-6">
         <Card className="bg-[#1a1a24] border-[#2a2a3a] p-8 text-center">
           <h2 className="text-2xl font-bold text-white mb-4">Please login to stream</h2>
-          <Button onClick={() => supabase.auth.redirectToLogin()}>Login</Button>
+          <Button type="button" onClick={() => supabase.auth.redirectToLogin()}>Login</Button>
         </Card>
       </div>
     );
@@ -939,6 +996,7 @@ export default function GoLivePage() {
                 {!isMultiBeam && (
                   <div className="flex items-center gap-1 bg-[#0a0a0f] rounded-lg p-1">
                     <Button 
+                      type="button"
                       onClick={() => handleZoomChange(0.7)} 
                       variant="ghost" 
                       size="sm"
@@ -947,6 +1005,7 @@ export default function GoLivePage() {
                       🔍-
                     </Button>
                     <Button 
+                      type="button"
                       onClick={() => handleZoomChange(1)} 
                       variant="ghost" 
                       size="sm"
@@ -955,6 +1014,7 @@ export default function GoLivePage() {
                       1x
                     </Button>
                     <Button 
+                      type="button"
                       onClick={() => handleZoomChange(1.3)} 
                       variant="ghost" 
                       size="sm"
@@ -965,9 +1025,9 @@ export default function GoLivePage() {
                   </div>
                 )}
                 
-                <Button onClick={toggleMute} variant="outline" size="icon" className={isMicMuted ? 'border-red-500 text-red-400' : 'border-green-500 text-green-400'}>{isMicMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}</Button>
-                <Button onClick={toggleCamera} variant="outline" size="icon" className={isCameraOff ? 'border-red-500 text-red-400' : 'border-green-500 text-green-400'}>{isCameraOff ? <VideoOff className="w-4 h-4" /> : <Video className="w-4 h-4" />}</Button>
-                <Button onClick={() => endStream()} className="bg-red-600 hover:bg-red-700">End Stream</Button>
+                <Button type="button" onClick={toggleMute} variant="outline" size="icon" className={isMicMuted ? 'border-red-500 text-red-400' : 'border-green-500 text-green-400'}>{isMicMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}</Button>
+                <Button type="button" onClick={toggleCamera} variant="outline" size="icon" className={isCameraOff ? 'border-red-500 text-red-400' : 'border-green-500 text-green-400'}>{isCameraOff ? <VideoOff className="w-4 h-4" /> : <Video className="w-4 h-4" />}</Button>
+                <Button type="button" onClick={() => endStream()} className="bg-red-600 hover:bg-red-700">End Stream</Button>
               </div>
             </div>
           </div>
@@ -1036,7 +1096,7 @@ export default function GoLivePage() {
                                 {b.occupiedBy?.id === user.id ? 'You' : b.occupiedBy?.username}
                               </Badge>
                               {b.occupiedBy?.id === user.id && (
-                                <Button onClick={() => leaveBox(b.id)} variant="outline" size="sm" className="absolute top-2 right-2">
+                                <Button type="button" onClick={() => leaveBox(b.id)} variant="outline" size="sm" className="absolute top-2 right-2">
                                   Leave
                                 </Button>
                               )}
@@ -1048,6 +1108,7 @@ export default function GoLivePage() {
                               <p className="text-gray-500 text-xs">{b.occupiedBy ? b.occupiedBy.username : 'Empty'}</p>
                               {!b.occupiedBy && b.id !== 1 && (
                                 <Button
+                                  type="button"
                                   disabled={b.joining}
                                   onClick={() => handleJoinBoxClick(b.id)}
                                   className="mt-3 bg-purple-600 hover:bg-purple-700"
@@ -1098,6 +1159,19 @@ export default function GoLivePage() {
 
                   <div>
                     <label className="text-white font-medium mb-2 block">Category *</label>
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      {categories.filter(c => c.id !== 'all').map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => setStreamConfig({ ...streamConfig, category: c.id })}
+                          className={`px-3 py-2 rounded-xl transition-all duration-150 text-sm font-medium ${streamConfig.category === c.id ? 'bg-purple-500 text-white' : 'bg-black text-gray-300 hover:bg-purple-500/10'}`}
+                        >
+                          {c.label}
+                        </button>
+                      ))}
+                    </div>
+
                     <Select value={streamConfig.category} onValueChange={(value) => setStreamConfig({ ...streamConfig, category: value })}>
                       <SelectTrigger className="bg-[#0a0a0f] border-[#2a2a3a] text-white"><SelectValue /></SelectTrigger>
                       <SelectContent>
@@ -1185,7 +1259,7 @@ export default function GoLivePage() {
                     </div>
                   )}
 
-                  <Button onClick={() => setStep(2)} disabled={!streamConfig.title.trim()} className="w-full bg-gradient-to-r from-purple-600 to-pink-600 py-6">Next</Button>
+                  <Button type="button" onClick={() => setStep(2)} disabled={!streamConfig.title.trim()} className="w-full bg-gradient-to-r from-purple-600 to-pink-600 py-6">Next</Button>
                 </div>
               </motion.div>
             )}
@@ -1200,8 +1274,8 @@ export default function GoLivePage() {
                   {thumbnailPreview && (<div className="bg-[#0a0a0f] rounded-lg p-4"><p className="text-gray-400 text-sm mb-2">Thumbnail</p><img src={thumbnailPreview} alt="Thumbnail" className="w-full h-32 object-cover rounded" /></div>)}
                 </div>
                 <div className="flex gap-3">
-                  <Button onClick={() => setStep(1)} variant="outline" className="flex-1" disabled={isStartingStream}>Back</Button>
-                  <Button onClick={handleStartStream} disabled={isStartingStream} className="flex-1 bg-gradient-to-r from-red-500 to-pink-500 py-6">{isStartingStream ? 'Starting...' : '🔴 Go Live'}</Button>
+                  <Button type="button" onClick={() => setStep(1)} variant="outline" className="flex-1" disabled={isStartingStream}>Back</Button>
+                  <Button type="button" onClick={handleStartStream} disabled={isStartingStream} className="flex-1 bg-gradient-to-r from-red-500 to-pink-500 py-6">{isStartingStream ? 'Starting...' : '🔴 Go Live'}</Button>
                 </div>
               </motion.div>
             )}

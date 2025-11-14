@@ -15,6 +15,7 @@ import {
 import { toast } from "sonner";
 import { format } from "date-fns";
 import TrollFamilyBadge from "../components/TrollFamilyBadge";
+import UserBadges from "@/components/UserBadges";
 import {
   Collapsible,
   CollapsibleContent,
@@ -359,6 +360,25 @@ export default function ProfilePage() {
     });
   };
 
+  const fileToDataUrl = (file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  useEffect(() => {
+    if (!user) return;
+    try {
+      const cached = localStorage.getItem(`tc_avatar_${user.id}`);
+      if (cached) {
+        queryClient.setQueryData(['currentUser'], (prev) => prev ? { ...prev, avatar: cached } : prev);
+      }
+    } catch (_) {}
+  }, [user, queryClient]);
+
   const handleAvatarUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -372,19 +392,38 @@ export default function ProfilePage() {
       setIsUploadingAvatar(true);
       // Resize large images to a sane avatar size, preserving aspect ratio
       const resizedFile = await resizeImage(file, { maxWidth: 512, maxHeight: 512, mimeType: 'image/jpeg', quality: 0.9 });
+      let uploadedUrl = null;
+      try {
+        const { file_url } = await supabase.integrations.Core.UploadFile({ file: resizedFile, bucket: 'avatars', pathPrefix: 'avatars' });
+        uploadedUrl = file_url;
+      } catch (uploadErr) {
+        const dataUrl = await fileToDataUrl(resizedFile);
+        uploadedUrl = dataUrl;
+        try { localStorage.setItem(`tc_avatar_${user.id}`, dataUrl); } catch (_) {}
+      }
 
-      // Upload via Supabase integrations, preferring the 'avatars' bucket
-      const { file_url } = await supabase.integrations.Core.UploadFile({ file: resizedFile, bucket: 'avatars', pathPrefix: 'avatars' });
-
-      // Update profile with the new avatar URL
-      const { error } = await supabase
-        .from('profiles')
-        .update({ avatar: file_url })
-        .eq('id', user.id);
-      if (error) throw error;
-
-      queryClient.invalidateQueries(['currentUser']);
-      toast.success('Avatar updated!');
+      if (uploadedUrl) {
+        if (supabase.__isConfigured) {
+          try {
+            const { error } = await supabase
+              .from('profiles')
+              .update({ avatar: uploadedUrl })
+              .eq('id', user.id);
+            if (error) {
+              // Keep local-only update on failure
+              queryClient.setQueryData(['currentUser'], (prev) => prev ? { ...prev, avatar: uploadedUrl } : prev);
+            }
+          } catch (_) {
+            queryClient.setQueryData(['currentUser'], (prev) => prev ? { ...prev, avatar: uploadedUrl } : prev);
+          }
+        } else {
+          queryClient.setQueryData(['currentUser'], (prev) => prev ? { ...prev, avatar: uploadedUrl } : prev);
+        }
+        queryClient.invalidateQueries(['currentUser']);
+        toast.success('Avatar updated!');
+      } else {
+        throw new Error('Failed to process avatar');
+      }
     } catch (error) {
       const msg = error?.message || 'Failed to upload avatar';
       toast.error(msg);
@@ -443,7 +482,10 @@ export default function ProfilePage() {
             </div>
 
             <div className="text-center">
-              <h1 className="text-2xl font-bold text-white">@{user.username || user.full_name}</h1>
+              <div className="flex items-center justify-center gap-2">
+                <h1 className="text-2xl font-bold text-white">@{user.username || user.full_name}</h1>
+                <UserBadges user={user} size="md" />
+              </div>
               <p className="text-gray-400 text-sm">{user.email}</p>
               <div className="flex items-center justify-center gap-2 mt-2">
                 <Badge className={`bg-gradient-to-r ${tierInfo.color} text-white`}>
@@ -627,51 +669,47 @@ export default function ProfilePage() {
                     <CreditCard className="w-4 h-4 mr-2" />Connect with Stripe
                   </Button>
                 </div>
-                {/* FIXED: Android-friendly payment method selector */}
+                {/* CashApp Only Payment Method */}
                 <div className="bg-[#0a0a0f] rounded-lg p-4">
-                  <label className="text-white font-medium mb-3 block text-sm">Add Payment Method</label>
+                  <label className="text-white font-medium mb-3 block text-sm">💰 CashApp Payout (Primary)</label>
+                  <p className="text-xs text-gray-400 mb-3">Only CashApp accepted. Enter amount with $ symbol (e.g., $25.00).</p>
                   
-                  <div className="space-y-2 mb-3">
-                    {['paypal', 'cashapp', 'zelle', 'venmo', 'bank_transfer'].map(method => (
-                      <button
-                        key={method}
-                        onClick={() => setSelectedPaymentMethod(method)}
-                        className={`w-full p-3 rounded-lg text-left transition-all ${
-                          selectedPaymentMethod === method 
-                            ? 'bg-purple-600 text-white border-2 border-purple-400' 
-                            : 'bg-[#1a1a24] text-gray-300 border-2 border-[#2a2a3a] hover:border-purple-500'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="font-medium capitalize">{method.replace('_', ' ')}</span>
-                          {selectedPaymentMethod === method && (
-                            <Check className="w-5 h-5 text-white" />
-                          )}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-
-                  {selectedPaymentMethod && (
-                    <div className="space-y-2">
-                      <Input 
-                        value={paymentDetails} 
-                        onChange={(e) => setPaymentDetails(e.target.value)}
-                        placeholder={`Enter your ${selectedPaymentMethod.replace('_', ' ')} details`}
-                        className="bg-[#1a1a24] border-[#2a2a3a] text-white"
-                      />
-                      <Button 
-                        onClick={() => startPaymentVerificationMutation.mutate({ 
-                          method: selectedPaymentMethod, 
-                          details: paymentDetails 
-                        })}
-                        disabled={!paymentDetails || startPaymentVerificationMutation.isPending}
-                        className="w-full bg-green-600 hover:bg-green-700"
-                      >
-                        Start Verification
-                      </Button>
+                  <div className="space-y-2">
+                    <Input 
+                      value={paymentDetails} 
+                      onChange={(e) => setPaymentDetails(e.target.value)}
+                      placeholder="$25.00 or $CashAppTag"
+                      className="bg-[#1a1a24] border-[#2a2a3a] text-white"
+                    />
+                    <div className="text-xs">
+                      {paymentDetails && !paymentDetails.startsWith('$') && (
+                        <p className="text-red-400">❌ Must start with $ symbol (e.g., $25.00)</p>
+                      )}
+                      {paymentDetails && paymentDetails.startsWith('$') && (
+                        <p className="text-green-400">✓ Valid CashApp format</p>
+                      )}
                     </div>
-                  )}
+                    <Button 
+                      onClick={() => {
+                        if (!paymentDetails.trim()) {
+                          alert('Please enter a payout amount');
+                          return;
+                        }
+                        if (!paymentDetails.startsWith('$')) {
+                          alert('CashApp payout must start with $ symbol (e.g., $25.00)');
+                          return;
+                        }
+                        startPaymentVerificationMutation.mutate({ 
+                          method: 'cashapp', 
+                          details: paymentDetails 
+                        });
+                      }}
+                      disabled={!paymentDetails || !paymentDetails.startsWith('$') || startPaymentVerificationMutation.isPending}
+                      className="w-full bg-emerald-600 hover:bg-emerald-700"
+                    >
+                      Submit CashApp Payout
+                    </Button>
+                  </div>
                 </div>
 
                 {paymentVerifications.map(v => (

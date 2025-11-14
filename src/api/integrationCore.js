@@ -75,9 +75,34 @@ export function attachIntegrations(supabase) {
   };
 
   // Basic AI invocation without external deps; returns rule-based JSON from instruction
-  supabase.integrations.Core.InvokeLLM = async ({ prompt }) => {
+  supabase.integrations.Core.InvokeLLM = async ({ prompt, model = 'gpt-5-nano', store = false } = {}) => {
     if (!prompt || prompt.length < 1) throw new Error('Prompt is required');
-    // Try to parse simple instructions like "increase X to N", "enable Y", "set Z to N"
+
+    // If Supabase Edge Functions are configured, prefer calling the server-side
+    // `openaiResponse` function so the OpenAI API key remains secret.
+    try {
+      if (supabase && supabase.functions && supabase.__isConfigured) {
+        const payload = { input: prompt, model, store };
+            const resp = await supabase.functions.invoke('openaiResponse', { body: payload });
+            const data = resp?.data || resp;
+
+            // Use helper to extract text/JSON
+            try {
+              const { extractOpenAIResponse } = await import('./openaiHelpers.js');
+              const parsed = extractOpenAIResponse(data);
+              if (parsed.json) return parsed.json;
+              if (parsed.text) return { text: parsed.text, raw: parsed.raw };
+            } catch (e) {
+              console.warn('InvokeLLM: parse helper failed', e?.message || e);
+            }
+
+            return { raw: data };
+      }
+    } catch (e) {
+      console.warn('InvokeLLM: server call failed, falling back to local rules:', e?.message || e);
+    }
+
+    // Fallback: local rule-based parsing (keeps previous behavior when offline)
     const cfg = {};
     const lower = prompt.toLowerCase();
     const incMatch = lower.match(/increase\s+(daily reward|reward)\s+to\s+(\d+)/);

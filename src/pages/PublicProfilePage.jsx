@@ -389,6 +389,7 @@ export default function PublicProfilePage() {
                 <div className="flex gap-3">
                   {isFollowing ? (
                     <Button
+                      type="button"
                       onClick={() => followMutation.mutate()}
                       disabled={followMutation.isPending}
                       className="bg-gray-600 hover:bg-gray-700"
@@ -398,6 +399,7 @@ export default function PublicProfilePage() {
                     </Button>
                   ) : (
                     <Button
+                      type="button"
                       onClick={openSubscribeDialog}
                       disabled={isInitializingPayPal}
                       className="bg-purple-600 hover:bg-purple-700"
@@ -407,6 +409,7 @@ export default function PublicProfilePage() {
                     </Button>
                   )}
                   <Button
+                    type="button"
                     onClick={startConversation}
                     className="bg-blue-600 hover:bg-blue-700"
                   >
@@ -418,6 +421,7 @@ export default function PublicProfilePage() {
 
               {isOwnProfile && (
                 <Button
+                  type="button"
                   onClick={() => navigate(createPageUrl("Profile"))}
                   className="bg-purple-600 hover:bg-purple-700"
                 >
@@ -578,8 +582,8 @@ export default function PublicProfilePage() {
         </DialogHeader>
         <div className="space-y-4">
           <p className="text-gray-400 text-sm">Pay securely via Stripe. Current demo amount: $1.50.</p>
-          <div className="flex justify-center">
-            <Button onClick={subscribeWithStripe} className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700">
+            <div className="flex justify-center">
+            <Button type="button" onClick={subscribeWithStripe} className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700">
               Pay with Stripe
             </Button>
           </div>

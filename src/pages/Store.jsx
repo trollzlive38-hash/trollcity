@@ -3,6 +3,7 @@ import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/api/supabaseClient";
 import { createStripeCheckout, confirmStripePayment, testStripeConnection, getFunctionsUrl, isFunctionsHostReachable } from "@/api/stripe";
+import { testSquareConnection } from "@/api/square";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -22,6 +23,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { creditCoins, debitCoins } from "@/lib/coins";
 import { motion } from "framer-motion";
 import {
   Dialog,
@@ -33,6 +35,8 @@ import {
 import { format } from "date-fns";
 import { formatCurrency } from "@/lib/utils";
 import { createPageUrl } from "@/utils";
+import AdminEditPanel from "@/components/AdminEditPanel";
+import { getAdminContent, updateAdminContent } from "@/api/admin";
 
 // Shared rarity color mapping for both StorePage and RandomEntranceOffers
 const rarityColors = {
@@ -53,11 +57,31 @@ export default function StorePage() {
   const [showTestDialog, setShowTestDialog] = useState(false);
   const [testResults, setTestResults] = useState(null);
   const [isTesting, setIsTesting] = useState(false);
+  const [notEnoughDialog, setNotEnoughDialog] = useState({ open: false, required: 0 });
+  const [adminContent, setAdminContent] = useState("");
+  const [isLoadingAdminContent, setIsLoadingAdminContent] = useState(true);
 
   // Detect if Supabase Functions are available in this environment
   const supabaseConfigError = typeof window !== 'undefined' ? !!window.__SUPABASE_CONFIG_ERROR__ : false;
   const functionsBase = getFunctionsUrl();
   const functionsEnabled = !!functionsBase && !supabaseConfigError;
+
+  // Load admin content for Store page
+  useEffect(() => {
+    const loadAdminContent = async () => {
+      try {
+        setIsLoadingAdminContent(true);
+        const content = await getAdminContent("Store", "header_content");
+        setAdminContent(content);
+      } catch (error) {
+        console.error('Error loading admin content:', error);
+      } finally {
+        setIsLoadingAdminContent(false);
+      }
+    };
+    
+    loadAdminContent();
+  }, []);
 
   // FIXED: Enhanced payment return handling with Stripe confirmation
   useEffect(() => {
@@ -99,7 +123,20 @@ export default function StorePage() {
             await queryClient.refetchQueries(["currentUser"]);
 
             const coinsAdded = result?.coinAmount || parseInt(coinAmount) || 0;
-            
+            // Attempt to credit coins centrally (in case the server hasn't already recorded it)
+            try {
+              if (userId && coinsAdded > 0) {
+                await creditCoins(userId, coinsAdded, { source: 'stripe', reference: sessionId });
+                // Invalidate again to pick up the credited coins
+                await queryClient.invalidateQueries(["currentUser"]);
+                await queryClient.refetchQueries(["currentUser"]);
+              }
+            } catch (creditErr) {
+              console.warn('[Store] creditCoins warning:', creditErr);
+              // Not fatal for user - show success but mention possible delay
+              toast.error('Your payment was confirmed but crediting coins failed automatically. Please contact support if your coins do not appear.', { duration: 8000 });
+            }
+
             toast.success(
               `🎉 Payment successful! ${coinsAdded.toLocaleString()} Troll Coins added to your account!`,
               { id: "payment-capture", duration: 6000 }
@@ -127,10 +164,14 @@ export default function StorePage() {
         const newUrl = window.location.origin + window.location.pathname + window.location.hash.split('?')[0];
         window.history.replaceState({}, "", newUrl);
       }
-    };
-    
-    handlePaymentReturn();
+  
+
+
+      }
+      handlePaymentReturn();
   }, [queryClient, isProcessingPayment]);
+
+  
 
   const { data: user } = useQuery({
     queryKey: ["currentUser"],
@@ -171,19 +212,46 @@ export default function StorePage() {
     initialData: [],
     enabled: !!user?.id,
   });
-
   const { data: purchaseHistory = [] } = useQuery({
-    queryKey: ["coinPurchases", user?.id],
+    queryKey: ["allPurchases", user?.id],
     queryFn: async () => {
       if (!user) return [];
-      const { data, error } = await supabase
+
+      // Fetch coin purchases
+      const { data: coinData, error: coinError } = await supabase
         .from('coin_purchases')
         .select('*')
         .eq('user_id', user.id)
         .order('created_date', { ascending: false })
         .limit(50);
-      if (error) { console.warn('Failed to fetch coin purchases:', error.message); return []; }
-      return data || [];
+      if (coinError) console.warn('Failed to fetch coin purchases:', coinError.message);
+
+      // Fetch entrance effects purchases
+      const { data: effectsData, error: effectsError } = await supabase
+        .from('user_entrance_effects')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      if (effectsError) console.warn('Failed to fetch entrance effects:', effectsError.message);
+
+      // Normalize and combine
+      const coinPurchases = (coinData || []).map(p => ({
+        ...p,
+        type: 'coins',
+        date: p.created_date
+      }));
+
+      const effectPurchases = (effectsData || []).map(e => ({
+        ...e,
+        type: 'entrance_effect',
+        // normalize date field
+        date: e.created_at || e.purchased_at || e.created_date || new Date().toISOString()
+      }));
+
+      const combined = [...coinPurchases, ...effectPurchases].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+      return combined;
     },
     enabled: !!user?.id,
     initialData: [],
@@ -213,22 +281,23 @@ export default function StorePage() {
   const purchaseEffectMutation = useMutation({
     mutationFn: async (effect) => {
       const coinCost = effect.coin_price;
-      const currentUser = await supabase.auth.me();
-      if ((currentUser.coins || 0) < coinCost) {
-        throw new Error("Not enough coins.");
-      }
-      const freeCoinsUsed = Math.min(currentUser.free_coins || 0, coinCost);
-      const purchasedCoinsUsed = coinCost - freeCoinsUsed;
-      await supabase.auth.updateMe({
-        coins: (currentUser.coins || 0) - coinCost,
-        free_coins: (currentUser.free_coins || 0) - freeCoinsUsed,
-        purchased_coins: (currentUser.purchased_coins || 0) - purchasedCoinsUsed,
-      });
+      // Ensure user is logged in and has enough coins, then debit and record effect
+      const { data: currentUser } = await supabase.auth.getUser();
+      const u = currentUser?.user || null;
+      if (!u || !u.id) throw new Error('Not logged in');
+      // Fetch latest profile balances
+      const { data: profile } = await supabase.from('profiles').select('coins').eq('id', u.id).single();
+      const availableCoins = (profile?.coins || 0);
+      if (availableCoins < coinCost) throw new Error('Not enough coins.');
+
+      // Debit coins centrally
+      await debitCoins(u.id, coinCost, { source: 'purchase_effect', reference: effect.id });
+
       const { error } = await supabase
         .from('user_entrance_effects')
         .insert({
-          user_id: currentUser.id,
-          user_name: currentUser.full_name,
+          user_id: u.id,
+          user_name: u.full_name || u.user_metadata?.full_name || '',
           effect_id: effect.id,
           effect_name: effect.name,
           animation_type: effect.animation_type,
@@ -333,13 +402,102 @@ export default function StorePage() {
     { id: 6, coins: 39900, price: 279.99, popular: false, emoji: "💸", bonus: 11900 },
   ];
 
+  // Removed duplicate hardcoded entranceEffects (uses DB query instead)
+
   const handlePurchaseEffect = (effect) => {
     const owned = userEffects.some((e) => e.effect_id === effect.id);
     if (owned) {
       toast.error("You already own this effect");
       return;
     }
+    const coinPriceNum = Number(effect.coin_price) || 0;
+    const userCoins = (user?.coins || 0);
+    if (coinPriceNum > userCoins) {
+      // Show a popup directing user to buy coins
+      setNotEnoughDialog({ open: true, required: coinPriceNum });
+      return;
+    }
     purchaseEffectMutation.mutate(effect);
+  };
+
+  const handlePurchaseEntranceEffect = async (effect) => {
+    if (!user) {
+      toast.error("Please login to purchase entrance effects");
+      return;
+    }
+
+    try {
+      // Check if user already owns this effect
+      const { data: existingEffect } = await supabase
+        .from('entrance_effects')
+        .select('id')
+        .eq('user_id', user.id)
+        .eq('effect_id', effect.id)
+        .single();
+
+      if (existingEffect) {
+        toast.error("You already own this entrance effect");
+        return;
+      }
+
+      // Check if user has enough purchased coins (real money coins)
+      const coinPriceNum = Number(effect.coin_price) || 0;
+      const userPurchasedCoins = (user?.purchased_coins || 0);
+      
+      if (coinPriceNum > userPurchasedCoins) {
+        toast.error(`You need ${coinPriceNum - userPurchasedCoins} more purchased coins to buy this effect`);
+        return;
+      }
+
+      // Deduct coins from purchased_coins (real money coins only)
+      const { error: updateError } = await supabase
+        .from('users')
+        .update({ purchased_coins: userPurchasedCoins - coinPriceNum })
+        .eq('id', user.id);
+
+      if (updateError) throw updateError;
+
+      // Add effect to entrance_effects table
+      const { error: insertError } = await supabase
+        .from('entrance_effects')
+        .insert({
+          user_id: user.id,
+          effect_id: effect.id,
+          effect_name: effect.name,
+          effect_animation: effect.animation,
+          effect_color: effect.color,
+          effect_intensity: effect.intensity,
+          purchased_at: new Date().toISOString()
+        });
+
+      if (insertError) throw insertError;
+
+      // Set as active entrance effect
+      const { error: activeError } = await supabase
+        .from('users')
+        .update({ active_entrance_effect: effect.id })
+        .eq('id', user.id);
+
+      if (activeError) throw activeError;
+
+      toast.success(`✨ Successfully purchased ${effect.name}!`);
+      
+      // Refresh user data to show updated purchased_coins
+      const { data: updatedUser } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', user.id)
+        .single();
+      
+      if (updatedUser) {
+        await queryClient.invalidateQueries(["currentUser"]);
+        await queryClient.refetchQueries(["currentUser"]);
+      }
+
+    } catch (error) {
+      console.error('Error purchasing entrance effect:', error);
+      toast.error(`Failed to purchase entrance effect: ${error.message}`);
+    }
   };
 
   const handlePurchaseCoins = (pkg) => {
@@ -437,6 +595,93 @@ export default function StorePage() {
                 💰 Purchased Troll Coins have REAL VALUE and can be cashed out by streamers
               </p>
             </div>
+
+            {/* Admin Edit Panel - Only visible to admins */}
+            <AdminEditPanel
+              pageName="Store Header"
+              currentContent={adminContent}
+              onSave={async (newContent) => {
+                await updateAdminContent("Store", newContent, "header_content");
+                setAdminContent(newContent);
+              }}
+              fieldName="header_content"
+            />
+
+            {/* Custom Admin Content Display */}
+            {adminContent && !isLoadingAdminContent && (
+              <div className="mb-8 p-4 bg-gradient-to-r from-purple-900/20 to-pink-900/20 border border-purple-500/30 rounded-lg">
+                <div className="text-white prose prose-invert max-w-none"
+                     dangerouslySetInnerHTML={{ __html: adminContent.replace(/\n/g, '<br />') }} />
+              </div>
+            )}
+
+            {/* Entrance Effects */}
+            <div className="mb-8">
+              <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-2">
+                <Sparkles className="w-6 h-6 text-pink-400" />
+                Entrance Effects
+              </h2>
+              <p className="text-gray-400 mb-6">
+                Make a grand entrance! Purchase stunning entrance effects that will dazzle your audience when you join streams. 
+                <span className="text-yellow-400 font-semibold">These effects can only be purchased with purchased coins (real money).</span>
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {entranceEffects.map((effect) => {
+                  const owned = userEffects.some((e) => e.effect_id === effect.id);
+                  const rarityKey = String(effect.rarity || 'common').toLowerCase();
+                  
+                  return (
+                    <motion.div
+                      key={effect.id}
+                      whileHover={{ scale: 1.05, y: -5 }}
+                      transition={{ type: "spring", stiffness: 300 }}
+                    >
+                      <Card className={`relative overflow-hidden transition-all duration-300 ${
+                        owned 
+                          ? "bg-gradient-to-br from-green-900/50 to-emerald-900/50 border-2 border-green-500" 
+                          : "bg-[#1a1a24] border-[#2a2a3a] hover:border-pink-500/50"
+                      }`}>
+                        {owned && (
+                          <div className="absolute top-0 right-0 bg-gradient-to-r from-green-600 to-emerald-600 text-white px-3 py-1 text-xs font-bold rounded-bl-lg">
+                            OWNED
+                          </div>
+                        )}
+                        <div className="p-6">
+                          <div className="text-center mb-4">
+                            <div className="text-6xl mb-3">{effect.icon}</div>
+                            <h3 className="text-xl font-bold text-white mb-2">{effect.name}</h3>
+                            <Badge className={`bg-gradient-to-r ${rarityColors[rarityKey] || 'from-gray-500 to-slate-500'} border-0 text-white mb-3`}>
+                              {effect.rarity}
+                            </Badge>
+                            <p className="text-gray-400 text-sm mb-4">{effect.description}</p>
+                            <div className="text-2xl font-bold text-yellow-400 mb-2 flex items-center justify-center gap-2">
+                              <Coins className="w-6 h-6" /> {effect.coin_price.toLocaleString()}
+                            </div>
+                            <p className="text-xs text-gray-500 mb-4">Purchased Coins Only</p>
+                            <Button
+                              type="button"
+                              onClick={() => handlePurchaseEntranceEffect(effect)}
+                              disabled={owned}
+                              className={`w-full mt-4 ${
+                                owned
+                                  ? "bg-gray-600 cursor-not-allowed"
+                                  : "bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-700 hover:to-purple-700"
+                              }`}
+                            >
+                              {owned ? (
+                                <><CheckCircle className="w-4 h-4 mr-2" /> Owned</>
+                              ) : (
+                                <><Sparkles className="w-4 h-4 mr-2" /> Purchase Effect</>
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+                      </Card>
+                    </motion.div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
           <div className="flex items-center gap-3">
             {user && (
@@ -462,6 +707,7 @@ export default function StorePage() {
             )}
             {user?.role === 'admin' && (
               <Button
+                type="button"
                 onClick={() => setShowTestDialog(true)}
                 variant="outline"
                 className="border-blue-500 text-blue-400 hover:bg-blue-500/10"
@@ -625,6 +871,7 @@ export default function StorePage() {
                               {Math.floor(totalCoins / pkg.price)} Troll Coins per $1
                             </p>
                             <Button
+                              type="button"
                               onClick={() => handlePurchaseCoins(pkg)}
                               className={`w-full mt-4 ${
                                 pkg.popular
@@ -679,6 +926,7 @@ export default function StorePage() {
                       </div>
                     </div>
                     <Button
+                      type="button"
                       onClick={() => {
                         setSelectedPackage({
                           coins: 1,
@@ -741,11 +989,12 @@ export default function StorePage() {
                     </p>
                   </div>
 
-                  <Button
-                    onClick={handleCustomPurchase}
-                    disabled={!customAmount || parseFloat(customAmount) < 1.00}
-                    className="w-full mt-6 bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 py-6 text-lg font-bold"
-                  >
+                    <Button
+                      type="button"
+                      onClick={handleCustomPurchase}
+                      disabled={!customAmount || parseFloat(customAmount) < 1.00}
+                      className="w-full mt-6 bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 py-6 text-lg font-bold"
+                    >
                     <CreditCard className="w-5 h-5 mr-2" />
                     Purchase {getCustomTotal().toLocaleString()} Troll Coins
                   </Button>
@@ -831,6 +1080,7 @@ export default function StorePage() {
                         )}
                         
                         <Button
+                          type="button"
                           onClick={() => hasPrice ? handlePurchaseEffect(effect) : toast.info("Please contact admin to purchase this effect")}
                           disabled={owned || purchaseEffectMutation.isPending || !hasPrice}
                           className={`w-full ${
@@ -871,7 +1121,7 @@ export default function StorePage() {
                 <div className="space-y-3">
                   {purchaseHistory.map((purchase) => (
                     <motion.div
-                      key={purchase.id}
+                      key={purchase.id || `${purchase.type}-${purchase.effect_id || ''}`}
                       initial={{ opacity: 0, x: -20 }}
                       animate={{ opacity: 1, x: 0 }}
                       className="bg-[#0a0a0f] rounded-lg p-4 border border-[#2a2a3a]"
@@ -879,31 +1129,63 @@ export default function StorePage() {
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
                           <div className="w-12 h-12 bg-gradient-to-br from-yellow-500 to-orange-500 rounded-full flex items-center justify-center">
-                            <Coins className="w-6 h-6 text-white" />
+                            {purchase.type === 'coins' ? (
+                              <Coins className="w-6 h-6 text-white" />
+                            ) : (
+                              <Sparkles className="w-6 h-6 text-white" />
+                            )}
                           </div>
                           <div>
-                            <p className="text-white font-bold text-lg">
-                              {purchase.coin_amount.toLocaleString()} Coins
-                            </p>
-                            <p className="text-gray-400 text-sm">{purchase.package_type}</p>
-                            <p className="text-gray-500 text-xs mt-1">
-                              {format(new Date(purchase.created_date), 'MMM d, yyyy h:mm a')}
-                            </p>
+                            {purchase.type === 'coins' ? (
+                              <>
+                                <p className="text-white font-bold text-lg">
+                                  {(purchase.coin_amount || 0).toLocaleString()} Coins
+                                </p>
+                                <p className="text-gray-400 text-sm">{purchase.package_type || 'Troll Coin Package'}</p>
+                                <p className="text-gray-500 text-xs mt-1">
+                                  {format(new Date(purchase.date || purchase.created_date), 'MMM d, yyyy h:mm a')}
+                                </p>
+                              </>
+                            ) : (
+                              <>
+                                <p className="text-white font-bold text-lg">
+                                  {purchase.effect_name || purchase.effect_name}
+                                </p>
+                                <p className="text-gray-400 text-sm">Entrance Effect</p>
+                                <p className="text-gray-500 text-xs mt-1">
+                                  {format(new Date(purchase.date || purchase.created_at), 'MMM d, yyyy h:mm a')}
+                                </p>
+                              </>
+                            )}
                           </div>
                         </div>
                         <div className="text-right">
-                          <p className="text-green-400 font-bold text-xl">
-                            {formatCurrency(purchase.usd_amount)}
-                          </p>
-                          <Badge className={
-                            purchase.status === 'completed' ? 'bg-green-500' :
-                            purchase.status === 'pending' ? 'bg-yellow-500' :
-                            'bg-red-500'
-                          }>
-                            {purchase.status === 'completed' && <CheckCircle className="w-3 h-3 mr-1" />}
-                            {purchase.status}
-                          </Badge>
-                          <p className="text-gray-500 text-xs mt-1">Stripe</p>
+                          {purchase.type === 'coins' ? (
+                            <>
+                              <p className="text-green-400 font-bold text-xl">
+                                {formatCurrency(purchase.usd_amount)}
+                              </p>
+                              <Badge className={
+                                purchase.status === 'completed' ? 'bg-green-500' :
+                                purchase.status === 'pending' ? 'bg-yellow-500' :
+                                'bg-red-500'
+                              }>
+                                {purchase.status === 'completed' && <CheckCircle className="w-3 h-3 mr-1" />}
+                                {purchase.status}
+                              </Badge>
+                              <p className="text-gray-500 text-xs mt-1">Stripe</p>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-green-400 font-bold text-xl">
+                                {(Number(purchase.purchased_price) || 0).toLocaleString()} Coins
+                              </p>
+                              <Badge className={(purchase.is_active ? 'bg-green-500' : 'bg-gray-600')}>
+                                {purchase.is_active ? 'Active' : 'Owned'}
+                              </Badge>
+                              <p className="text-gray-500 text-xs mt-1">Entrance Effect</p>
+                            </>
+                          )}
                         </div>
                       </div>
                     </motion.div>
@@ -996,6 +1278,7 @@ export default function StorePage() {
               </div>
 
               <Button
+                type="button"
                 onClick={() => {
                   // Redirect to manual payment flow instead of Stripe
                   setShowPaymentDialog(false);
@@ -1020,6 +1303,27 @@ export default function StorePage() {
         </DialogContent>
       </Dialog>
 
+      {/* Not Enough Coins Dialog */}
+      <Dialog open={notEnoughDialog.open} onOpenChange={(v) => setNotEnoughDialog((s) => ({ ...s, open: v }))}>
+        <DialogContent className="bg-[#1a1a24] border-[#2a2a3a] max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-white">Not enough coins</DialogTitle>
+            <DialogDescription className="text-gray-400">You don't have enough coins to purchase this effect.</DialogDescription>
+          </DialogHeader>
+          <div className="p-4">
+            <p className="text-gray-200 mb-4">This effect requires <strong>{notEnoughDialog.required}</strong> coins.</p>
+            <div className="flex gap-2">
+              <Button type="button" className="flex-1 bg-green-600 hover:bg-green-700" onClick={() => { setActiveTab('coins'); setNotEnoughDialog({ open: false, required: 0 }); window.scrollTo({ top: 0, behavior: 'smooth' }); }}>
+                Buy Coins
+              </Button>
+              <Button type="button" variant="outline" className="flex-1" onClick={() => setNotEnoughDialog({ open: false, required: 0 })}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Test Stripe Connection Dialog */}
       <Dialog open={showTestDialog} onOpenChange={setShowTestDialog}>
         <DialogContent className="bg-[#1a1a24] border-[#2a2a3a] max-w-3xl max-h-[80vh] overflow-y-auto">
@@ -1041,6 +1345,7 @@ export default function StorePage() {
                 </div>
                 <p className="text-gray-300 mb-4">Click the button below to test your Stripe integration</p>
                 <Button
+                  type="button"
                   onClick={testStripe}
                   className="bg-blue-600 hover:bg-blue-700"
                 >
@@ -1107,6 +1412,7 @@ export default function StorePage() {
                 {/* Retry Button */}
                 <div className="flex gap-3">
                   <Button
+                    type="button"
                     onClick={() => setShowTestDialog(false)}
                     variant="outline"
                     className="flex-1 border-[#2a2a3a] text-white hover:bg-[#2a2a3a]"
@@ -1114,6 +1420,7 @@ export default function StorePage() {
                     Close
                   </Button>
                   <Button
+                    type="button"
                     onClick={testStripe}
                     className="flex-1 bg-blue-600 hover:bg-blue-700"
                   >
@@ -1199,7 +1506,7 @@ function RandomEntranceOffers({ effects = [], userEffects = [], onPurchase }) {
           <Sparkles className="w-5 h-5 text-pink-400" />
           Random Entrance Offers
         </h3>
-        <Button onClick={generateOffers} disabled={refreshing} className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700">
+  <Button type="button" onClick={generateOffers} disabled={refreshing} className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700">
           {refreshing ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Shuffle'}
         </Button>
       </div>
@@ -1243,6 +1550,7 @@ function RandomEntranceOffers({ effects = [], userEffects = [], onPurchase }) {
                   <span className="text-gray-500 text-sm">(NO CASH VALUE)</span>
                 </div>
                 <Button
+                  type="button"
                   onClick={handlePurchase}
                   disabled={owned}
                   className={`w-full ${owned ? 'bg-gray-600 cursor-not-allowed' : 'bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700'}`}

@@ -1,4 +1,5 @@
 import React from 'react'
+import './index.css'
 import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
@@ -18,7 +19,12 @@ ReactDOM.createRoot(document.getElementById('root')).render(
 )
 
 // Optional: register service worker if present
-if ('serviceWorker' in navigator) {
+// Only register a service worker when explicitly enabled via env and in production
+if (
+  import.meta.env.PROD &&
+  import.meta.env.VITE_ENABLE_SW === 'true' &&
+  'serviceWorker' in navigator
+) {
   window.addEventListener('load', () => {
     navigator.serviceWorker
       .register('/service-worker.js')

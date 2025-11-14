@@ -9,15 +9,42 @@ import { Coins, Users, Radio, MessageCircle, UserPlus, UserMinus, Crown, Shield,
 import { toast } from "sonner";
 import { useNavigate, Link } from "react-router-dom"; // Added Link
 import { createPageUrl } from "@/utils";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import OGBadge from "../components/OGBadge";
+import UserBadges from "@/components/UserBadges";
 import TrollFamilyBadge from "../components/TrollFamilyBadge";
 
 export default function PublicProfilePage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const urlParams = new URLSearchParams(window.location.search);
-  const userId = urlParams.get("userId");
+  let userId = urlParams.get("userId");
+  const username = urlParams.get("username");
   const isValidUuid = typeof userId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
+
+  // If username provided but no userId, look up the user ID
+  const { data: userIdFromUsername } = useQuery({
+    queryKey: ['userIdFromUsername', username],
+    queryFn: async () => {
+      if (!username) return null;
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('username', username)
+        .limit(1);
+      if (!error && data && data[0]) {
+        return data[0].id;
+      }
+      return null;
+    },
+    enabled: !!username && !userId,
+  });
+
+  // Update userId if we found it from username
+  if (userIdFromUsername && !userId) {
+    userId = userIdFromUsername;
+  }
 
   const { data: currentUser } = useQuery({
     queryKey: ['currentUser'],
@@ -110,7 +137,9 @@ export default function PublicProfilePage() {
           following_id: userId
         });
         if (follows[0]) {
-          await supabase.entities.Follow.delete(follows[0].id);
+          try { await supabase.entities.Follow.delete(follows[0].id); } catch {}
+          // Fallback: remove from follows table
+          try { await supabase.from('follows').delete().eq('id', follows[0].id); } catch {}
         }
         // Update follower/following counts in profiles table
         const { error: unfollowTargetErr } = await supabase
@@ -124,7 +153,8 @@ export default function PublicProfilePage() {
           .eq('id', currentUser.id);
         if (unfollowSelfErr) throw unfollowSelfErr;
       } else {
-        await supabase.entities.Follow.create({
+        try {
+          await supabase.entities.Follow.create({
           follower_id: currentUser.id,
           follower_name: currentUser.full_name,
           follower_username: currentUser.username,
@@ -134,6 +164,13 @@ export default function PublicProfilePage() {
           following_username: profileUser.username,
           following_avatar: profileUser.avatar
         });
+        } catch (_) {
+          // Fallback to direct table insert
+          await supabase.from('follows').insert({
+            follower_id: currentUser.id,
+            following_id: userId
+          });
+        }
         const { error: followTargetErr } = await supabase
           .from('profiles')
           .update({ follower_count: (profileUser.follower_count || 0) + 1 })
@@ -145,17 +182,36 @@ export default function PublicProfilePage() {
           .eq('id', currentUser.id);
         if (followSelfErr) throw followSelfErr;
         
-        // Send notification
-        await supabase.entities.Notification.create({
-          user_id: userId,
-          type: "new_follower",
-          title: "New Follower",
-          message: `${currentUser.username || currentUser.full_name} started following you!`,
-          icon: "👥",
-          related_user_id: currentUser.id,
-          related_user_name: currentUser.username || currentUser.full_name,
-          is_read: false
-        });
+        // Send notification - use direct insert with fallback
+        try {
+          await supabase.from('notifications').insert({
+            user_id: userId,
+            type: 'new_follower',
+            title: 'New Follower',
+            message: `${currentUser.username || currentUser.full_name} started following you!`,
+            icon: '👥',
+            related_user_id: currentUser.id,
+            related_user_name: currentUser.username || currentUser.full_name,
+            is_read: false,
+            created_date: new Date().toISOString(),
+          });
+        } catch (err) {
+          // Fallback to entities if direct insert fails
+          try {
+            await supabase.entities.Notification.create({
+              user_id: userId,
+              type: "new_follower",
+              title: "New Follower",
+              message: `${currentUser.username || currentUser.full_name} started following you!`,
+              icon: "👥",
+              related_user_id: currentUser.id,
+              related_user_name: currentUser.username || currentUser.full_name,
+              is_read: false
+            });
+          } catch (_) {
+            console.log("Notification creation failed, but follow was successful");
+          }
+        }
       }
     },
     onSuccess: () => {
@@ -165,6 +221,9 @@ export default function PublicProfilePage() {
       toast.success(isFollowing ? "Unfollowed" : "Following!");
     },
   });
+
+  const [openMessage, setOpenMessage] = React.useState(false);
+  const [messageText, setMessageText] = React.useState("");
 
   const startConversation = async () => {
     // ADDED: Admin can message anyone regardless of privacy settings
@@ -177,45 +236,107 @@ export default function PublicProfilePage() {
       toast.info("🛡️ Admin access: Messaging user with closed messages");
     }
 
-    // Check if conversation already exists
-    const existingConv = await supabase.entities.Conversation.filter({
-      participant1_id: currentUser.id,
-      participant2_id: userId
-    });
-    
-    const existingConv2 = await supabase.entities.Conversation.filter({
-      participant1_id: userId,
-      participant2_id: currentUser.id
-    });
+    try {
+      // Check if conversation already exists
+      const { data: existingConv } = await supabase
+        .from('conversations')
+        .select('*')
+        .eq('participant1_id', currentUser.id)
+        .eq('participant2_id', userId)
+        .limit(1);
+      
+      const { data: existingConv2 } = await supabase
+        .from('conversations')
+        .select('*')
+        .eq('participant1_id', userId)
+        .eq('participant2_id', currentUser.id)
+        .limit(1);
 
-    if (existingConv[0] || existingConv2[0]) {
-      navigate(createPageUrl("Messages"));
-      return;
+      let convId = existingConv?.[0]?.id || existingConv2?.[0]?.id || null;
+
+      if (!convId) {
+        const { data: newConv, error } = await supabase
+          .from('conversations')
+          .insert({ participant1_id: currentUser.id, participant2_id: userId })
+          .select('*')
+          .single();
+        if (!error && newConv) {
+          convId = newConv.id;
+        }
+      }
+      
+      if (convId) {
+        toast.success("Opening conversation...");
+        navigate(createPageUrl("Messages"));
+      } else {
+        toast.error("Failed to create conversation");
+      }
+    } catch (err) {
+      console.error("Error starting conversation:", err);
+      toast.error("Failed to start conversation");
     }
+  };
 
-    // Create new conversation
-    await supabase.entities.Conversation.create({
-      participant1_id: currentUser.id,
-      participant1_name: currentUser.full_name,
-      participant1_username: currentUser.username,
-      participant1_avatar: currentUser.avatar,
-      participant1_created_date: currentUser.created_date,
-      participant1_troll_family_id: currentUser.troll_family_id,
-      participant1_troll_family_name: currentUser.troll_family_name,
-      participant2_id: userId,
-      participant2_name: profileUser.full_name,
-      participant2_username: profileUser.username,
-      participant2_avatar: profileUser.avatar,
-      participant2_created_date: profileUser.created_date,
-      participant2_troll_family_id: profileUser.troll_family_id,
-      participant2_troll_family_name: profileUser.troll_family_name,
-      last_message: "",
-      last_message_time: new Date().toISOString(),
-      unread_count_p1: 0,
-      unread_count_p2: 0
-    });
-
-    navigate(createPageUrl("Messages"));
+  const sendProfileMessage = async () => {
+    const text = messageText.trim();
+    if (!text) return;
+    try {
+      // Find or create conversation minimal
+      const { data: convsA } = await supabase.from('conversations').select('*').eq('participant1_id', currentUser.id).eq('participant2_id', userId).limit(1);
+      const { data: convsB } = await supabase.from('conversations').select('*').eq('participant1_id', userId).eq('participant2_id', currentUser.id).limit(1);
+      let convId = (convsA?.[0]?.id) || (convsB?.[0]?.id) || null;
+      if (!convId) {
+        const { data } = await supabase.from('conversations').insert({ participant1_id: currentUser.id, participant2_id: userId }).select('*').single();
+        convId = data?.id || convId;
+      }
+      if (!convId) {
+        const created = await supabase.entities.Conversation.create({ participant1_id: currentUser.id, participant2_id: userId });
+        convId = created?.id || convId;
+      }
+      // Prefer direct_messages table
+      let payload = { conversation_id: convId, sender_id: currentUser.id, message: text, created_date: new Date().toISOString() };
+      let sent = false;
+      for (let attempt = 0; attempt < 3 && !sent; attempt++) {
+        const { error } = await supabase.from('direct_messages').insert(payload);
+        if (!error) { sent = true; break; }
+        const m = String(error?.message || error);
+        const colMatch = m.match(/column\s+"?(\w+)"?\s+does not exist/i);
+        const col = colMatch?.[1];
+        if (col && payload.hasOwnProperty(col)) { delete payload[col]; continue; }
+        break;
+      }
+      if (!sent) {
+        await supabase.from('messages').insert({ conversation_id: convId, sender_id: currentUser.id, content: text });
+      }
+      // Update unread counter for the recipient if columns exist
+      try {
+        const { data: conv } = await supabase.from('conversations').select('*').eq('id', convId).limit(1);
+        const row = conv?.[0] || null;
+        const isP1 = row?.participant1_id === currentUser.id;
+        const updateObj = isP1
+          ? { unread_count_p2: (row?.unread_count_p2 || 0) + 1, last_message: text.slice(0,100), last_message_time: new Date().toISOString() }
+          : { unread_count_p1: (row?.unread_count_p1 || 0) + 1, last_message: text.slice(0,100), last_message_time: new Date().toISOString() };
+        await supabase.from('conversations').update(updateObj).eq('id', convId);
+      } catch (_) {}
+      // Notify recipient
+      try {
+        await supabase.from('notifications').insert({
+          user_id: userId,
+          type: 'message',
+          title: 'New Message',
+          message: `${currentUser.username || currentUser.full_name} sent you a message`,
+          link_url: createPageUrl('Messages'),
+          is_read: false,
+          created_date: new Date().toISOString(),
+        });
+      } catch (_) {}
+      toast.success('Message sent');
+      setOpenMessage(false);
+      setMessageText('');
+      navigate(createPageUrl('Messages'));
+    } catch (e) {
+      toast.error(e?.message || 'Failed to send message');
+    }
   };
 
   if (!userId) {
@@ -275,7 +396,10 @@ export default function PublicProfilePage() {
             <div className="flex-1">
               <div className="flex items-center gap-3 mb-2 flex-wrap">
                 <h1 className="text-3xl font-bold text-white">
-                  @{profileUser.username || "NoUsername"}
+                  <div className="flex items-center gap-2">
+                    @{profileUser.username || "NoUsername"}
+                    <UserBadges user={profileUser} size="md" />
+                  </div>
                 </h1>
                 <Badge className="bg-purple-500 text-white">
                   Level {profileUser.level || 1}
@@ -341,6 +465,7 @@ export default function PublicProfilePage() {
               {!isOwnProfile && currentUser && (
                 <div className="flex gap-3">
                   <Button
+                    type="button"
                     onClick={() => followMutation.mutate()}
                     disabled={followMutation.isPending}
                     className={isFollowing ? "bg-gray-600 hover:bg-gray-700" : "bg-purple-600 hover:bg-purple-700"}
@@ -358,6 +483,7 @@ export default function PublicProfilePage() {
                     )}
                   </Button>
                   <Button
+                    type="button"
                     onClick={startConversation}
                     className="bg-blue-600 hover:bg-blue-700"
                   >
@@ -369,6 +495,7 @@ export default function PublicProfilePage() {
 
               {isOwnProfile && (
                 <Button
+                  type="button"
                   onClick={() => navigate(createPageUrl("Profile"))}
                   className="bg-purple-600 hover:bg-purple-700"
                 >
@@ -420,6 +547,7 @@ export default function PublicProfilePage() {
                   )}
                 </div>
                 <Button
+                  type="button"
                   onClick={() => navigate(createPageUrl("TrollFamily"))}
                   variant="outline"
                   className="w-full border-purple-500 text-purple-400"
@@ -519,6 +647,19 @@ export default function PublicProfilePage() {
           </Card>
         )}
       </div>
+        {/* Message Dialog */}
+        <Dialog open={openMessage} onOpenChange={setOpenMessage}>
+          <DialogContent className="bg-[#1a1a24] border-[#2a2a3a] max-w-lg w-full">
+            <DialogHeader>
+              <DialogTitle className="text-white">Message @{profileUser.username || profileUser.full_name}</DialogTitle>
+            </DialogHeader>
+            <Textarea value={messageText} onChange={(e)=>setMessageText(e.target.value)} placeholder="Type your message" className="bg-[#0f0f16] border-[#2a2a3a] text-white" />
+            <div className="flex gap-2 justify-end mt-3">
+              <Button variant="outline" className="border-[#2a2a3a]" onClick={()=>setOpenMessage(false)}>Cancel</Button>
+              <Button className="bg-blue-600 hover:bg-blue-700" onClick={sendProfileMessage}>Send</Button>
+            </div>
+          </DialogContent>
+        </Dialog>
     </div>
   );
 }

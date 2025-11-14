@@ -4,10 +4,12 @@ import { useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Eye, Radio, Users, Gamepad2, Music, MessageCircle, Palette, User } from "lucide-react";
+import { Eye, Radio, Users, Gamepad2, Music, MessageCircle, Palette, User, Crown, Diamond } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { createPageUrl } from "@/utils";
 import TrollCityShower from "@/components/TrollCityShower";
+import TopTrollersCard from "@/components/TopTrollersCard";
+import { getHighPayingBroadcasters } from "@/api/broadcasterMonetization";
 
 export default function HomePage() {
   const navigate = useNavigate();
@@ -57,10 +59,30 @@ export default function HomePage() {
           return true;
         });
         
-        // Step 3: Filter out user's own stream
-        const visibleStreams = trulyLiveStreams.filter(
-          (s) => !user || s.streamer_id !== user.id
-        );
+        // Step 3: Filter out user's own stream and any streams where the current user is banned
+        let visibleStreams = trulyLiveStreams;
+        if (user) {
+          visibleStreams = trulyLiveStreams.filter(s => s.streamer_id !== user.id);
+
+          try {
+            const streamerIds = Array.from(new Set(visibleStreams.map(s => s.streamer_id).filter(Boolean)));
+            if (streamerIds.length > 0) {
+              const { data: bans = [] } = await supabase
+                .from('user_stream_bans')
+                .select('streamer_id')
+                .in('streamer_id', streamerIds)
+                .eq('user_id', user.id)
+                .eq('is_active', true);
+
+              const bannedStreamerIds = new Set((bans || []).map(b => String(b.streamer_id)));
+              visibleStreams = visibleStreams.filter(s => !bannedStreamerIds.has(String(s.streamer_id)));
+            }
+          } catch (e) {
+            console.warn('Failed to fetch user stream bans', e?.message || e);
+          }
+        } else {
+          visibleStreams = trulyLiveStreams;
+        }
 
         console.log(`✅ Live streams: ${allLiveStreams.length} found, ${trulyLiveStreams.length} active, ${visibleStreams.length} visible`);
         return visibleStreams;
@@ -97,6 +119,24 @@ export default function HomePage() {
     refetchOnWindowFocus: true,
   });
 
+  // High-paying broadcasters query
+  const { data: highPayingBroadcasters = [], isLoading: broadcastersLoading } = useQuery({
+    queryKey: ['highPayingBroadcasters'],
+    queryFn: async () => {
+      try {
+        const broadcasters = await getHighPayingBroadcasters();
+        return broadcasters;
+      } catch (err) {
+        console.error("Failed to load high-paying broadcasters:", err);
+        return [];
+      }
+    },
+    initialData: [],
+    staleTime: 30000, // Refresh every 30 seconds
+    refetchInterval: 60000, // Check every minute for new high-paying broadcasters
+    refetchOnWindowFocus: true,
+  });
+
   // Temporarily disabled: cleanupStreams call caused network errors when functions are unavailable.
   // If needed later, reintroduce behind a feature flag or admin-only toggle.
 
@@ -126,31 +166,26 @@ export default function HomePage() {
         </p>
       </header>
 
-      <div className="w-full max-w-6xl mx-auto space-y-10">
-        {/* Categories */}
-        <section>
-          <h2 className="text-2xl font-semibold text-white mb-4">📂 Categories</h2>
-          <div className="flex flex-wrap gap-3">
-            {categories.map((category) => {
-              const Icon = category.icon;
-              return (
-                <Button
-                  key={category.id}
-                  onClick={() => setSelectedCategory(category.id)}
-                  variant={selectedCategory === category.id ? "default" : "outline"}
-                  className={`${
-                    selectedCategory === category.id
-                      ? "bg-gradient-to-r from-purple-600 to-pink-600 text-white"
-                      : "bg-[#1a1a24] border-[#2a2a3a] text-gray-300 hover:text-white hover:bg-[#2a2a3a]"
-                  }`}
-                >
-                  <Icon className="w-4 h-4 mr-2" />
-                  {category.label}
-                </Button>
-              );
-            })}
+      {/* Hero / Landing with Login CTA (MAI Introduces Troll City) */}
+      <section className="w-full max-w-6xl mx-auto mb-10">
+        <div className="relative rounded-xl overflow-hidden bg-black/50">
+          <img
+            src="/mai_trollcity.jpeg"
+            alt="MAI Introduces Troll City"
+            className="w-full h-72 object-cover opacity-95"
+            onError={(e) => { e.target.style.opacity = 0.6 }}
+          />
+          <div className="absolute inset-0 bg-gradient-to-b from-black/30 to-black/60 flex items-center">
+            <div className="max-w-3xl mx-auto px-6 py-8 text-center text-white">
+              <h2 className="text-3xl sm:text-4xl font-extrabold mb-2">MAI Introduces Troll City</h2>
+              <p className="text-gray-300 mb-4">A new line of reinventions. Join the live experience, send gifts, and be a part of the chaos.</p>
+              {/* Removed Log In / Create Account CTAs from home hero per request */}
+            </div>
           </div>
-        </section>
+        </div>
+      </section>
+
+      <div className="w-full max-w-6xl mx-auto space-y-10">
 
         {/* Live Streams */}
         <section>
@@ -267,6 +302,74 @@ export default function HomePage() {
           )}
         </section>
 
+        {/* High-Paying Broadcasters - Gold Diamond Section */}
+        {highPayingBroadcasters && highPayingBroadcasters.length > 0 && (
+          <section>
+            <div className="flex items-center gap-3 mb-6">
+              <Crown className="w-6 h-6 text-yellow-400" />
+              <h2 className="text-2xl font-semibold text-white">
+                💎 High-Paying Trollers
+              </h2>
+              <Badge className="bg-yellow-500 text-black">
+                {highPayingBroadcasters.length} VIP
+              </Badge>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+              {highPayingBroadcasters.map((broadcaster) => (
+                <div
+                  key={broadcaster.id}
+                  onClick={() => navigate(createPageUrl("PublicProfile") + `?userId=${broadcaster.id}`)}
+                  className="cursor-pointer group relative"
+                >
+                  <Card className="bg-gradient-to-br from-yellow-900/20 to-yellow-600/20 border-yellow-500/50 overflow-hidden hover:border-yellow-400 transition-all group-hover:scale-105 relative">
+                    {/* Gold diamond border animation */}
+                    <div className="absolute inset-0 bg-gradient-to-r from-yellow-400/20 via-yellow-300/30 to-yellow-400/20 animate-pulse opacity-50"></div>
+                    <div className="absolute -top-1 -right-1 w-8 h-8 bg-gradient-to-br from-yellow-400 to-yellow-600 rounded-full flex items-center justify-center animate-bounce">
+                      <Diamond className="w-4 h-4 text-white" />
+                    </div>
+                    
+                    <div className="relative p-4">
+                      <div className="flex flex-col items-center gap-3">
+                        {broadcaster.avatar ? (
+                          <img
+                            src={broadcaster.avatar}
+                            alt={broadcaster.username}
+                            className="w-20 h-20 rounded-full object-cover border-4 border-yellow-400 shadow-lg"
+                          />
+                        ) : (
+                          <div className="w-20 h-20 rounded-full bg-gradient-to-br from-yellow-400 to-yellow-600 flex items-center justify-center border-4 border-yellow-300 shadow-lg">
+                            <span className="text-white text-2xl font-bold">
+                              {broadcaster.username?.[0]?.toUpperCase()}
+                            </span>
+                          </div>
+                        )}
+                        
+                        <div className="text-center">
+                          <p className="text-white font-bold text-lg truncate">
+                            @{broadcaster.username}
+                          </p>
+                          <p className="text-yellow-400 text-sm font-semibold">
+                            ${broadcaster.monthly_spending?.toLocaleString() || 0} this month
+                          </p>
+                          <Badge className="bg-yellow-500 text-black text-xs mt-1">
+                            💰 High Roller
+                          </Badge>
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Top Trollers Leaderboard */}
+        <section>
+          <TopTrollersCard />
+        </section>
+
         {/* New Trollerz */}
         <section>
           <div className="flex items-center gap-3 mb-6">
@@ -325,6 +428,19 @@ export default function HomePage() {
           )}
         </section>
       </div>
+
+      {/* Footer */}
+      <footer className="w-full mt-16 py-6 bg-transparent">
+        <div className="w-full max-w-6xl mx-auto text-center text-gray-400 text-sm">
+          <p>© {new Date().getFullYear()} MAI Corporation. All rights reserved.</p>
+          <p className="mt-1">
+            <a href="/Employment" className="underline mr-4">Employment</a>
+            <a href="/ContactUs" className="underline">Contact Us</a>
+          </p>
+          <p className="mt-2">Contact: <a className="underline" href="mailto:trollcity2025@gmail.com">trollcity2025@gmail.com</a></p>
+        </div>
+      </footer>
+
     </main>
   );
 }

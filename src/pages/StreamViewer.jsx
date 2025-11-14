@@ -5,6 +5,10 @@ import ChatBox from "@/components/stream/ChatBox";
 import AgoraRTC from "agora-rtc-sdk-ng";
 import { getAgoraToken } from "@/utils/agora";
 import EntranceEffect from "@/components/stream/EntranceEffect";
+import GiftBox from "@/components/stream/GiftBox";
+import LikeButton from "@/components/stream/LikeButton";
+import StreamerStatsPanel from "@/components/stream/StreamerStatsPanel";
+import GiftAnimation from "@/components/stream/GiftAnimationDisplay";
 
 const StreamViewer = ({
   appId,
@@ -25,6 +29,7 @@ const StreamViewer = ({
   const [viewerToken, setViewerToken] = useState(null);
   const [connecting, setConnecting] = useState(false);
   const [derivedAppId, setDerivedAppId] = useState(null);
+  const [incomingGifts, setIncomingGifts] = useState([]);
 
   // Derive streamId from query params when routed via pages like Home/AdminLiveControl
   const searchParams = new URLSearchParams(window.location.search);
@@ -246,12 +251,42 @@ const StreamViewer = ({
     effectiveStream?.status === "live"
   );
 
+  // Check whether the current user is banned from this stream by the streamer
+  const { data: myStreamBan } = useQuery({
+    queryKey: ["myStreamBan", effectiveStream?.id, currentUser?.id],
+    queryFn: async () => {
+      if (!effectiveStream?.streamer_id || !currentUser?.id) return null;
+      const { data, error } = await supabase
+        .from('user_stream_bans')
+        .select('*')
+        .eq('streamer_id', effectiveStream.streamer_id)
+        .eq('user_id', currentUser.id)
+        .eq('is_active', true)
+        .limit(1)
+        .single();
+      if (error) {
+        // ignore not-found errors
+        return null;
+      }
+      return data || null;
+    },
+    enabled: !!effectiveStream?.streamer_id && !!currentUser?.id,
+    refetchInterval: 5000,
+  });
+
+  const isBannedFromThisStream = !!myStreamBan;
+
   useEffect(() => {
     const shouldAttemptJoin = !effectiveIsStreamer && (
       normalizedIsLive || !!effectiveChannelName
     ) && !!effectiveAppId;
 
     if (shouldAttemptJoin) {
+      if (isBannedFromThisStream) {
+        console.warn('[StreamViewer] User is banned from this stream, blocking join');
+        return; // Do not attempt to join
+      }
+
       const timer = setTimeout(() => {
         initAgoraClient();
       }, 1000);
@@ -338,6 +373,17 @@ const StreamViewer = ({
       {entranceUser && (
         <EntranceEffect user={entranceUser} durationMs={4000} onComplete={() => setEntranceUser(null)} />
       )}
+
+      {/* Gift animations (multiple gifts at once) */}
+      {incomingGifts.map((giftEvent, idx) => (
+        <GiftAnimation
+          key={idx}
+          gift={giftEvent.gift}
+          senderName={giftEvent.senderName}
+          duration={4000}
+        />
+      ))}
+
       <div
         ref={videoContainerRef}
         id="video-container"
@@ -347,8 +393,22 @@ const StreamViewer = ({
           display: "flex",
           justifyContent: "center",
           alignItems: "center",
+          position: "relative",
         }}
       >
+        {/* Streamer stats panel (only show for broadcaster) */}
+        {effectiveIsStreamer && effectiveStream && (
+          <div style={{
+            position: "absolute",
+            top: 16,
+            left: 16,
+            zIndex: 30,
+            width: 300,
+          }}>
+            <StreamerStatsPanel streamerId={effectiveStream.streamer_id} streamId={effectiveStream.id} />
+          </div>
+        )}
+
         <p style={{ color: "#fff" }}>
           {connecting
             ? "Connecting to live stream..."
@@ -363,9 +423,31 @@ const StreamViewer = ({
       </div>
 
       {/* Chat sidebar */}
-      <div style={{ width: 360, borderLeft: "1px solid #222", background: "#0a0a0f" }}>
+      <div style={{ width: 360, borderLeft: "1px solid #222", background: "#0a0a0f", display: "flex", flexDirection: "column" }}>
         {effectiveStream ? (
-          <ChatBox stream={effectiveStream} user={currentUser} canModerate={canModerate} />
+          <>
+            {/* Viewer controls (gift box, like button) */}
+            {!effectiveIsStreamer && (
+              <div style={{ padding: "12px", borderBottom: "1px solid #222", display: "flex", gap: "8px" }}>
+                <GiftBox
+                  userId={currentUser?.id}
+                  streamId={effectiveStream.id}
+                  streamerName={effectiveStream.broadcaster_name || "Streamer"}
+                  onGiftSent={(giftEvent) => {
+                    setIncomingGifts([...incomingGifts, giftEvent]);
+                    // Remove gift after animation
+                    setTimeout(() => {
+                      setIncomingGifts(prev => prev.filter((_, i) => i !== 0));
+                    }, 4500);
+                  }}
+                />
+                <LikeButton userId={currentUser?.id} streamId={effectiveStream.id} />
+              </div>
+            )}
+            <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+              <ChatBox stream={effectiveStream} user={currentUser} canModerate={canModerate} isStreamer={effectiveIsStreamer} />
+            </div>
+          </>
         ) : (
           <div style={{ color: "#bbb", padding: 12 }}>Loading chat…</div>
         )}

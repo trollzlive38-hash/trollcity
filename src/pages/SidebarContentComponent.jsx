@@ -3,7 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 import { createPageUrl } from "@/utils";
 import {
   Home, Heart, MessageCircle, Bell, ShoppingBag, Sparkles, Crown,
-  Calendar, DollarSign, Users, Shield, Swords, Radio
+  Calendar, DollarSign, Users, Shield, Swords, Radio, Dices
 } from "lucide-react";
 import {
   Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent,
@@ -21,6 +21,16 @@ export default function SidebarContentComponent({ user }) {
   const { setOpenMobile } = useSidebar();
   const [latestGift, setLatestGift] = useState(null);
   const queryClient = useQueryClient();
+
+  const getTierInfo = (level) => {
+    if (level >= 1 && level <= 9) return { tier: 1, color: "from-gray-500 to-slate-500" };
+    if (level >= 10 && level <= 19) return { tier: 2, color: "from-blue-500 to-cyan-500" };
+    if (level >= 20 && level <= 29) return { tier: 3, color: "from-purple-500 to-pink-500" };
+    if (level >= 30) return { tier: 4, color: "from-yellow-500 to-orange-500" };
+    return { tier: 1, color: "from-gray-500 to-slate-500" };
+  };
+  const userLevel = user?.level || 1;
+  const tierInfo = getTierInfo(userLevel);
 
   // --- Notifications ---
   const { data: unreadCount = 0 } = useQuery({
@@ -104,19 +114,30 @@ export default function SidebarContentComponent({ user }) {
 
   const monetizationNavItems = [
     { title: "Store", url: createPageUrl("Store"), icon: ShoppingBag },
+    { title: "Gamble", url: createPageUrl("Gamble"), icon: Dices },
     { title: "Subscriptions", url: createPageUrl("Subscriptions"), icon: Crown },
     { title: "Daily Rewards", url: createPageUrl("Rewards"), icon: Calendar },
     { title: "Earnings", url: createPageUrl("Earnings"), icon: DollarSign },
   ];
 
   const adminNavItems = [
+    { title: "Earnings", url: createPageUrl("Earnings"), icon: DollarSign },
     // Route fixes: use explicit paths matching App.jsx
     { title: "Admin Dashboard", url: "/AdminDashboard", icon: Shield },
+    { title: "Send Invite", url: "/AdminInvite", icon: Users },
     { title: "Admin Live Control", url: "/AdminLiveControl", icon: Radio },
     { title: "Lives Overview", url: "/AdminLives", icon: Radio },
+    { title: "Trollers", url: "/Trollers", icon: Users },
     { title: "T-O Command", url: "/TOCommand", icon: Swords },
     { title: "Troll Officer App", url: "/OfficerApp", icon: Swords },
     { title: "Troll Family App", url: "/FamilyApp", icon: Users },
+    { title: "AI Console", url: "/AdminAI", icon: Sparkles },
+  ];
+
+  // Extra nav for Officers (visible to admins and troll officers)
+  const officerNavItems = [
+    { title: "Troll Officers", url: "/TrollOfficers", icon: Shield },
+    { title: "Family Payouts", url: "/FamilyPayouts", icon: Users },
   ];
 
   const renderNavItems = items =>
@@ -171,41 +192,96 @@ export default function SidebarContentComponent({ user }) {
           <SidebarGroupContent>
             <SidebarMenu>{renderNavItems(mainNavItems)}</SidebarMenu>
             <SidebarMenu>{renderNavItems(monetizationNavItems)}</SidebarMenu>
-            <SidebarMenu>{renderNavItems(adminNavItems)}</SidebarMenu>
+            {(user?.is_admin || user?.role === 'admin') && (
+              <SidebarMenu>{renderNavItems(adminNavItems)}</SidebarMenu>
+            )}
+            {(user?.is_troll_officer || user?.role === 'admin' || user?.is_admin) && (
+              <SidebarMenu>
+                {renderNavItems(officerNavItems)}
+              </SidebarMenu>
+            )}
           </SidebarGroupContent>
         </SidebarGroup>
+
+        {user && (
+          <>
+            <SidebarGroup className="mt-4">
+              <Link to={createPageUrl("Store")} onClick={handleLinkClick}>
+                <div className="px-4 py-3 rounded-xl cursor-pointer hover:bg-yellow-500/10 transition-all" style={{ background: "rgba(234, 179, 8, 0.1)" }}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm text-gray-400">My Coins</span>
+                    <Sparkles className="w-4 h-4 text-yellow-400" />
+                  </div>
+                  <div className="text-2xl font-bold text-yellow-400">
+                    {(user.coins || 0).toLocaleString()} 
+                  </div>
+                  <div className="text-xs text-yellow-600 mt-1 flex items-center gap-1">
+                    <ShoppingBag className="w-3 h-3" />
+                    Buy More
+                  </div>
+                </div>
+              </Link>
+            </SidebarGroup>
+
+            <SidebarGroup className="mt-4">
+              <div className="px-4 py-3 rounded-xl" style={{ background: "rgba(168, 85, 247, 0.1)" }}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm text-gray-400">Level & Tier</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className={`text-2xl font-bold bg-gradient-to-r ${tierInfo.color} bg-clip-text text-transparent`}>
+                    {userLevel}
+                  </div>
+                  <Badge className={`bg-gradient-to-r ${tierInfo.color} border-0 text-white text-xs`}>
+                    Tier {tierInfo.tier}
+                  </Badge>
+                </div>
+              </div>
+            </SidebarGroup>
+          </>
+        )}
       </SidebarContent>
 
-      {/* ✅ Fancy Footer */}
+      {/* ✅ Footer with login/logout */}
       <SidebarFooter className="border-t border-white/10 p-4 bg-gradient-to-r from-[#0a0a0f]/70 to-[#1a0a1f]/70 backdrop-blur-md">
         {user ? (
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center justify-center gap-3">
             <div className="flex items-center gap-3">
               <div className="relative">
                 <img
-                  src={user.user_metadata?.avatar_url || "https://placehold.co/40x40"}
+                  src={user?.avatar || user?.user_metadata?.avatar_url || "https://placehold.co/40x40"}
                   alt="avatar"
                   className="w-10 h-10 rounded-full object-cover ring-2 ring-emerald-500/30 shadow-lg"
                 />
                 <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-emerald-400 rounded-full border border-black"></div>
               </div>
-              <div className="flex flex-col">
-                <p className="font-semibold text-sm text-white">Profile</p>
-                {/* Email/username hidden per privacy policy */}
+              <div className="flex flex-col min-w-0">
+                <p className="font-semibold text-sm text-white truncate">@{user?.username || user?.user_metadata?.user_name || user?.full_name || "User"}</p>
+                <p className="text-xs text-gray-400 truncate">{user?.email || user?.user_metadata?.email || ""}</p>
+                <p className="text-[11px] text-gray-500 truncate">Level {user?.level || 1} • Status: {user?.is_banned ? 'Banned' : (user?.role === 'admin' || user?.is_admin) ? 'Admin' : user?.is_troll_officer ? 'Troll Officer' : user?.is_og ? 'OG' : 'Member'}</p>
               </div>
             </div>
 
             <Button
+              type="button"
               onClick={async () => await supabase.auth.signOut()}
-              variant="outline"
-              size="sm"
-              className="border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-all duration-200"
+              className="w-full bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600"
             >
               Logout
             </Button>
           </div>
         ) : (
-          <div className="text-sm text-gray-400">Loading...</div>
+          <div className="flex items-center justify-center gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 flex items-center justify-center shadow-lg shadow-emerald-500/30">
+                <span className="text-xl font-bold text-white">T</span>
+              </div>
+              <div className="flex flex-col">
+                <p className="font-semibold text-sm text-white">Welcome to TrollCity</p>
+                <p className="text-xs text-gray-400">Sign in to access all features</p>
+              </div>
+            </div>
+          </div>
         )}
       </SidebarFooter>
     </Sidebar>

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/api/supabaseClient";
@@ -7,9 +7,35 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { createPageUrl } from "@/utils";
 import { toast } from "sonner";
+import { AlertCircle, Coins, DollarSign, Upload } from "lucide-react";
+import { motion } from "framer-motion";
+
+const PAYMENT_METHODS = {
+  paypal: { label: "PayPal", icon: "🅿️", sendTo: null, askFor: "your PayPal email to verify" },
+  cashapp: { label: "Cash App", icon: "💵", sendTo: "$TrollCityLLC", askFor: "your CashApp handle (for verification)" },
+  venmo: { label: "Venmo", icon: "Ⓥ", sendTo: null, askFor: "your Venmo username (for verification)" },
+  zelle: { label: "Zelle", icon: "💳", sendTo: null, askFor: "your Zelle email or phone" },
+  bank_transfer: { label: "Bank Transfer", icon: "🏦", sendTo: null, askFor: "your bank details (for verification)" },
+};
+
+const COIN_PRESETS = [
+  { coins: 500, usd: 6.49 },
+  { coins: 1370, usd: 12.99 },
+  { coins: 3140, usd: 19.99 },
+  { coins: 6850, usd: 49.99 },
+  { coins: 19700, usd: 139.99 },
+  { coins: 39900, usd: 279.99 },
+];
 
 export default function ManualCoinsPayment() {
   const navigate = useNavigate();
@@ -18,36 +44,65 @@ export default function ManualCoinsPayment() {
     queryFn: getCurrentUserProfile,
   });
 
-  // CashApp-only flow per request
-  const [method] = useState("cashapp");
-  const [details] = useState("$TrollCityLLC");
+  // CashApp only flow
+  const method = "cashapp"; // Hardcoded to CashApp only
+  const [paymentAccount, setPaymentAccount] = useState("");
   const [file, setFile] = useState(null);
+  const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [coinAmount, setCoinAmount] = useState("");
+  const [usdAmount, setUsdAmount] = useState("");
+  const [selectedPreset, setSelectedPreset] = useState(null);
+
+  // Auto-calculate USD from coins preset
+  useEffect(() => {
+    if (selectedPreset) {
+      setCoinAmount(selectedPreset.coins.toString());
+      setUsdAmount(selectedPreset.usd.toString());
+    }
+  }, [selectedPreset]);
+
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    
     if (!currentUser?.id) {
-      toast.error("Please log in to submit a receipt");
+      toast.error("Please log in to submit a payment request");
       supabase.auth.redirectToLogin?.();
       return;
     }
-    // CashApp handle/details are fixed; only require receipt screenshot
+
+    // Validation
+    if (!paymentAccount || paymentAccount.trim() === "") {
+      toast.error("Enter your CashApp handle");
+      return;
+    }
     if (!file) {
-      toast.error("Attach a receipt screenshot (image)");
+      toast.error("Upload a payment proof screenshot");
+      return;
+    }
+    if (!coinAmount || parseInt(coinAmount) < 1) {
+      toast.error("Enter coin amount (minimum 1 coin)");
+      return;
+    }
+    if (!usdAmount || parseFloat(usdAmount) < 0.01) {
+      toast.error("Enter USD amount (minimum $0.01)");
       return;
     }
 
     try {
       setSubmitting(true);
+      toast.loading("Uploading payment proof...", { id: "payment-upload" });
 
-      // Upload receipt to Storage: try 'images' first, then fallback to 'avatars' on RLS/bucket issues
+      // Upload payment proof screenshot
       const userId = currentUser.id;
       const ext = file.name?.split(".").pop() || "jpg";
-      const path = `receipts/${userId}/${Date.now()}.${ext}`;
-      const candidates = ["images", "avatars"]; // buckets that exist in your project
+      const path = `manual-payments/${userId}/${Date.now()}.${ext}`;
+      const candidates = ["images", "avatars"];
       let file_url = "";
       let usedBucket = null;
       let lastError = null;
+
       for (const bucketName of candidates) {
         const { error: uploadError } = await supabase.storage
           .from(bucketName)
@@ -55,361 +110,341 @@ export default function ManualCoinsPayment() {
             contentType: file.type || "application/octet-stream",
             upsert: true,
           });
+
         if (uploadError) {
           lastError = uploadError;
           const msg = (uploadError?.message || "").toLowerCase();
           const isBucketMissing = msg.includes("bucket") && msg.includes("not found");
           const isRlsDenied = msg.includes("row-level security") || msg.includes("permission denied") || msg.includes("policy");
           if (isBucketMissing || isRlsDenied) {
-            // Try next candidate bucket
             continue;
           }
-          // Other error types: surface immediately
           throw uploadError;
         }
+
         const { data: pub } = await supabase.storage.from(bucketName).getPublicUrl(path);
         file_url = pub?.publicUrl || "";
         usedBucket = bucketName;
         break;
       }
+
       if (!usedBucket) {
         throw new Error(
-          `Upload blocked or bucket missing. Allow authenticated insert on one of [${candidates.join(", ")}] or make the bucket public. Details: ${lastError?.message || lastError}`
+          `Upload failed: ${lastError?.message || "No suitable storage bucket available"}`
         );
       }
 
-      // Create a PaymentVerification entry for admin review
-      const verification_code = Math.floor(100000 + Math.random() * 900000).toString();
-      const payment_details = `method=${method}; handle=${details}; receipt_url=${file_url}`;
-      {
-        const { error: pvErr } = await supabase
-          .from('payment_verifications')
-          .insert({
-            user_id: currentUser.id,
-            user_name: currentUser.full_name,
-            payment_method: method,
-            payment_details,
-            verification_code,
-            verified_by_user: true,
-            verified_by_admin: false,
-            verification_date: new Date().toISOString(),
-          });
-        if (pvErr) throw pvErr;
-      }
+      toast.loading("Creating payment request...", { id: "payment-upload" });
 
-      // Find an admin to message
-      const adminRes = await supabase
-        .from("profiles")
-        .select("*")
-        .eq("role", "admin")
-        .limit(1);
-      const admin = Array.isArray(adminRes.data) ? adminRes.data[0] : null;
+      // Insert into manual_payment_requests table
+      const { error: insertError } = await supabase
+        .from("manual_payment_requests")
+        .insert({
+          user_id: currentUser.id,
+          username: currentUser.username || currentUser.full_name || currentUser.email.split("@")[0],
+          user_email: currentUser.email,
+          coin_amount: parseInt(coinAmount),
+          usd_amount: parseFloat(usdAmount).toFixed(2),
+          payment_method: method,
+          payment_account: paymentAccount,
+          payment_proof_url: file_url,
+          status: "pending",
+          created_date: new Date().toISOString(),
+        });
 
-      if (admin?.id) {
-        // Ensure a conversation exists
-        const { data: existingA } = await supabase
-          .from('conversations')
-          .select('*')
-          .eq('participant1_id', currentUser.id)
-          .eq('participant2_id', admin.id)
-          .limit(1);
-        const { data: existingB } = await supabase
-          .from('conversations')
-          .select('*')
-          .eq('participant1_id', admin.id)
-          .eq('participant2_id', currentUser.id)
-          .limit(1);
-        let conversation = (existingA && existingA[0]) || (existingB && existingB[0]);
+      if (insertError) throw insertError;
 
-        let convId = conversation?.id;
-        if (!convId) {
-          // Robust insert: progressively drop unknown columns to match actual schema
-          const basePayload = {
-            participant1_id: currentUser.id,
-            participant2_id: admin.id,
-          };
-          let payload = {
-            ...basePayload,
-            participant1_name: currentUser.full_name,
-            participant1_username: currentUser.username,
-            participant1_avatar: currentUser.avatar,
-            participant1_created_date: currentUser.created_date,
-            participant1_troll_family_id: currentUser.troll_family_id,
-            participant1_troll_family_name: currentUser.troll_family_name,
-            participant2_name: admin.full_name,
-            participant2_username: admin.username,
-            participant2_avatar: admin.avatar,
-            participant2_created_date: admin.created_date,
-            participant2_troll_family_id: admin.troll_family_id,
-            participant2_troll_family_name: admin.troll_family_name,
-          };
+      toast.success(
+        "✅ Payment request submitted! Admins will review your proof and credit coins to your account.",
+        { id: "payment-upload", duration: 5000 }
+      );
 
-          let createdConv = null;
-          for (let attempt = 0; attempt < 8; attempt++) {
-            const { data, error } = await supabase
-              .from('conversations')
-              .insert(payload)
-              .select()
-              .single();
-            if (!error) { createdConv = data; break; }
-            const msg = String(error?.message || error);
-            // Detect missing column and remove it, else fall back to minimal base
-            const schemaCacheMatch = msg.match(/Could not find the '([^']+)' column of 'conversations' in the schema cache/i);
-            const missingColumnMatch = msg.match(/column\s+"?(\w+)"?\s+does not exist/i);
-            const col = schemaCacheMatch?.[1] || missingColumnMatch?.[1] || null;
-            if (col && payload.hasOwnProperty(col)) {
-              delete payload[col];
-              continue;
-            }
-            // If we cannot identify the column, try minimal payload
-            payload = { ...basePayload };
-          }
-
-          if (!createdConv) {
-            // Final attempt with minimal payload
-            const { data: minimalData } = await supabase
-              .from('conversations')
-              .insert(basePayload)
-              .select()
-              .single();
-            createdConv = minimalData || null;
-          }
-
-          convId = createdConv?.id || null;
-          conversation = createdConv || conversation; // keep a reference to the effective conversation
-          if (!convId) {
-            // Refetch just in case
-            const { data: refetch } = await supabase
-              .from('conversations')
-              .select('*')
-              .eq('participant1_id', currentUser.id)
-              .eq('participant2_id', admin.id)
-              .limit(1);
-            convId = refetch?.[0]?.id || null;
-            if (refetch && refetch[0]) conversation = refetch[0];
-          }
-        }
-
-        if (convId) {
-          const messageText = `Manual coins payment submitted.\n\n` +
-            `Method: ${method}\n` +
-            `Handle: ${details}\n` +
-            `Receipt: ${file_url}\n` +
-            `Verification Code: ${verification_code}`;
-          {
-            // Try sending a direct message; if the table doesn't exist, fall back to officer_chats
-            try {
-              // Build payload including created_date to satisfy Messages ordering
-              let dmPayload = {
-                conversation_id: convId,
-                sender_id: currentUser.id,
-                sender_name: currentUser.full_name,
-                sender_username: currentUser.username || currentUser.full_name,
-                sender_avatar: currentUser.avatar,
-                receiver_id: admin.id,
-                receiver_name: admin.full_name,
-                message: messageText,
-                is_read: false,
-                created_date: new Date().toISOString(),
-              };
-              let sent = false;
-              for (let attempt = 0; attempt < 4 && !sent; attempt++) {
-                const { error: dmErr } = await supabase
-                  .from('direct_messages')
-                  .insert(dmPayload);
-                if (!dmErr) { sent = true; break; }
-                const m = String(dmErr?.message || dmErr);
-                const schemaCacheMatch = m.match(/Could not find the '([^']+)' column of 'direct_messages' in the schema cache/i);
-                const missingColumnMatch = m.match(/column\s+"?(\w+)"?\s+does not exist/i);
-                const col = schemaCacheMatch?.[1] || missingColumnMatch?.[1] || null;
-                if (col && Object.prototype.hasOwnProperty.call(dmPayload, col)) {
-                  delete dmPayload[col];
-                  continue;
-                }
-                throw dmErr; // unexpected error
-              }
-              if (!sent) throw new Error('Failed to insert DM after adaptive attempts');
-            } catch (e) {
-              const msg = String(e?.message || e);
-              if (
-                msg.includes("Could not find the table 'public.direct_messages' in the schema cache") ||
-                msg.includes('PGRST205') ||
-                msg.includes('relation')
-              ) {
-                // Fallback: notify officers/admins using officer_chats
-                // Robust insert: progressively drop unknown columns to match actual officer_chats schema
-                let ocPayload = {
-                  sender_id: currentUser.id,
-                  sender_email: currentUser.email || null,
-                  sender_name: currentUser.full_name || currentUser.username || 'User',
-                  sender_username: currentUser.username || currentUser.full_name || null,
-                  sender_avatar: currentUser.avatar || null,
-                  is_admin: (currentUser.role === 'admin' || currentUser.user_role === 'admin') || false,
-                  message: `[Manual Coins] ${messageText}`,
-                  message_type: 'text',
-                };
-                let inserted = false;
-                for (let attempt = 0; attempt < 6 && !inserted; attempt++) {
-                  const { error: ocErr } = await supabase
-                    .from('officer_chats')
-                    .insert(ocPayload);
-                  if (!ocErr) { inserted = true; break; }
-                  const m = String(ocErr?.message || ocErr);
-                  const schemaCacheMatch = m.match(/Could not find the '([^']+)' column of 'officer_chats' in the schema cache/i);
-                  const missingColumnMatch = m.match(/column\s+"?(\w+)"?\s+does not exist/i);
-                  const col = schemaCacheMatch?.[1] || missingColumnMatch?.[1] || null;
-                  if (col && ocPayload.hasOwnProperty(col)) {
-                    delete ocPayload[col];
-                    continue;
-                  }
-                  break; // Not a missing column error; exit loop
-                }
-                if (!inserted) {
-                  // Final fallback: ultra-minimal payload (only message)
-                  const minimal = {
-                    message: `[Manual Coins] ${messageText}`,
-                  };
-                  const { error: finalErr } = await supabase
-                    .from('officer_chats')
-                    .insert(minimal);
-                  if (finalErr) throw finalErr;
-                }
-              } else {
-                throw e;
-              }
-            }
-
-            // Additional fallback: notify admin via Notifications so it always surfaces in UI
-            try {
-              let notif = {
-                user_id: admin.id,
-                type: 'message',
-                title: 'Manual Coins Payment Submitted',
-                message: `User ${currentUser.full_name || currentUser.username || currentUser.email} submitted a manual payment. Verification Code: ${verification_code}.`,
-                link_url: createPageUrl('Messages'),
-                is_read: false,
-                created_date: new Date().toISOString(),
-              };
-              let notified = false;
-              for (let attempt = 0; attempt < 6 && !notified; attempt++) {
-                const { error: nErr } = await supabase
-                  .from('notifications')
-                  .insert(notif);
-                if (!nErr) { notified = true; break; }
-                const m = String(nErr?.message || nErr);
-                const schemaCacheMatch = m.match(/Could not find the '([^']+)' column of 'notifications' in the schema cache/i);
-                const missingColumnMatch = m.match(/column\s+"?(\w+)"?\s+does not exist/i);
-                const col = schemaCacheMatch?.[1] || missingColumnMatch?.[1] || null;
-                if (col && Object.prototype.hasOwnProperty.call(notif, col)) {
-                  delete notif[col];
-                  continue;
-                }
-                break;
-              }
-              if (!notified) {
-                const minimalNotif = {
-                  user_id: admin.id,
-                  message: `[Manual Coins] ${messageText}`,
-                  type: 'message',
-                  link_url: createPageUrl('Messages'),
-                };
-                const { error: finalNotifErr } = await supabase
-                  .from('notifications')
-                  .insert(minimalNotif);
-                if (finalNotifErr) {
-                  // Non-blocking: if notifications table is missing entirely, ignore
-                  const msgN = String(finalNotifErr?.message || finalNotifErr);
-                  if (!msgN.includes('schema cache') && !msgN.includes('relation')) throw finalNotifErr;
-                }
-              }
-            } catch (_) {
-              // Swallow notifications errors; primary path already messaged via DM or officer chat
-            }
-          }
-
-          // Try to update conversation metadata, but fall back gracefully if columns are missing
-          try {
-            const isP1 = conversation?.participant1_id === currentUser.id;
-            const updateObj = {
-              last_message: messageText.substring(0, 100),
-              last_message_time: new Date().toISOString(),
-              ...(isP1
-                ? { unread_count_p2: (conversation?.unread_count_p2 || 0) + 1 }
-                : { unread_count_p1: (conversation?.unread_count_p1 || 0) + 1 }
-              ),
-            };
-            const { error: upErr } = await supabase
-              .from('conversations')
-              .update(updateObj)
-              .eq('id', convId);
-            if (upErr) throw upErr;
-          } catch (e) {
-            const msg = e?.message || String(e);
-            // Ignore schema-cache/column-missing errors to avoid blocking flow
-            if (
-              msg.includes("schema cache") ||
-              msg.includes("Could not find the 'last_message' column") ||
-              msg.includes("last_message_time") ||
-              msg.includes("unread_count_p1") ||
-              msg.includes("unread_count_p2")
-            ) {
-              console.warn("Conversation metadata columns missing; skipping update.");
-            } else {
-              // Re-throw unexpected errors
-              throw e;
-            }
-          }
-        }
-      }
-
-      toast.success("Receipt submitted. A conversation with admin was created.");
-      // Navigate to Messages so the user can see the DM thread
-      navigate(createPageUrl("Messages"));
+      // Navigate to Store page
+      setTimeout(() => {
+        navigate(createPageUrl("Store"));
+      }, 2000);
     } catch (err) {
-      console.error(err);
-      toast.error(err?.message || "Failed to submit manual payment");
+      console.error("❌ Manual payment error:", err);
+      toast.error(err?.message || "Failed to submit payment request", { id: "payment-upload", duration: 6000 });
     } finally {
       setSubmitting(false);
     }
   };
 
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#0a0a0f] via-[#1a0a1f] to-[#0a0a0f] p-6 md:p-8">
-      <div className="max-w-2xl mx-auto">
-        <Card className="bg-[#1a1a24] border-[#2a2a3a] p-6">
-          <h2 className="text-2xl font-bold text-white mb-2">Manual Coins Payment</h2>
-          <p className="text-gray-400 text-sm mb-6">
-            Send funds via Cash App to <span className="text-white font-semibold">$TrollCityLLC</span>, then upload a receipt screenshot.
+    <div className="min-h-screen bg-[#0a0a0f] p-6 md:p-8">
+      <div className="max-w-4xl mx-auto">
+        {/* Header */}
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-8"
+        >
+          <div className="flex items-center gap-3 mb-2">
+            <Coins className="w-8 h-8 text-yellow-400" />
+            <h1 className="text-4xl font-bold text-white">Manual Coin Payment</h1>
+          </div>
+          <p className="text-gray-400 text-lg">
+            Send payment via CashApp to <span className="text-green-400 font-semibold">$TrollCityLLC</span>, then upload proof. Our admins will verify and credit your account.
           </p>
+        </motion.div>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="bg-[#0a0a0f] rounded-lg p-4 border border-[#2a2a3a]">
-              <p className="text-gray-300 text-sm">Send via Cash App</p>
-              <p className="text-white font-bold">$TrollCityLLC</p>
-            </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Main Form */}
+          <motion.div
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="lg:col-span-2"
+          >
+            <form onSubmit={handleSubmit} className="space-y-6">
+              {/* CashApp Payment Instructions & Account */}
+              <Card className="bg-[#1a1a24] border-[#2a2a3a] p-6">
+                {/* Send Payment To */}
+                <div className="mb-6 bg-gradient-to-r from-green-500/20 to-emerald-500/20 border border-green-500/30 rounded-lg p-4">
+                  <p className="text-gray-400 text-sm mb-1">💰 Send Payment To:</p>
+                  <p className="text-2xl font-bold text-green-400">$TrollCityLLC</p>
+                  <p className="text-xs text-green-300 mt-2">This is where you send the payment for your coins</p>
+                </div>
 
-            <div>
-              <label className="text-white text-sm mb-1 block">Receipt screenshot (images only)</label>
-              <Input
-                type="file"
-                accept="image/*"
-                onChange={(e) => setFile(e.target.files?.[0] || null)}
-                className="bg-[#0a0a0f] border-[#2a2a3a] text-white"
-              />
-            </div>
+                {/* Your CashApp Handle */}
+                <h2 className="text-xl font-bold text-white mb-4">Step 1: Your CashApp Handle</h2>
+                <div>
+                  <label className="text-gray-400 text-sm mb-2 block">
+                    Your CashApp Handle
+                  </label>
+                  <Input
+                    type="text"
+                    placeholder="$YourHandle"
+                    value={paymentAccount}
+                    onChange={(e) => setPaymentAccount(e.target.value)}
+                    className="bg-[#0a0a0f] border-[#2a2a3a] text-white text-lg py-3"
+                  />
+                  <p className="text-xs text-gray-500 mt-2">
+                    Your CashApp handle so we can verify the payment came from your account
+                  </p>
+                </div>
+              </Card>
 
-            <div className="flex items-center justify-between">
-              <Badge className="bg-blue-600">Manual Review</Badge>
-              <Button
-                type="submit"
-                disabled={submitting}
-                className="bg-green-600 hover:bg-green-700"
+              {/* Coin Amount */}
+              <Card className="bg-[#1a1a24] border-[#2a2a3a] p-6">
+                                <h2 className="text-xl font-bold text-white mb-4">Step 2: Choose Coin Package</h2>
+                <div className="mb-4">
+                  <p className="text-gray-400 text-sm mb-3">Quick Presets:</p>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                    {COIN_PRESETS.map((preset) => (
+                      <motion.button
+                        key={preset.coins}
+                        type="button"
+                        onClick={() => setSelectedPreset(preset)}
+                        whileHover={{ scale: 1.05 }}
+                        className={`p-3 rounded-lg border-2 transition-all text-center ${
+                          selectedPreset?.coins === preset.coins
+                            ? "border-green-500 bg-green-500/20"
+                            : "border-[#2a2a3a] bg-[#0a0a0f] hover:border-[#3a3a4a]"
+                        }`}
+                      >
+                        <div className="text-yellow-400 font-bold">{preset.coins.toLocaleString()}</div>
+                        <div className="text-gray-400 text-xs">${preset.usd.toFixed(2)}</div>
+                      </motion.button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-gray-400 text-sm mb-2 block">Coins</label>
+                    <Input
+                      type="number"
+                      placeholder="500"
+                      min="1"
+                      value={coinAmount}
+                      onChange={(e) => setCoinAmount(e.target.value)}
+                      className="bg-[#0a0a0f] border-[#2a2a3a] text-white text-lg py-3"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-gray-400 text-sm mb-2 block">USD Amount ($)</label>
+                    <Input
+                      type="number"
+                      placeholder="6.49"
+                      min="0.01"
+                      step="0.01"
+                      value={usdAmount}
+                      onChange={(e) => setUsdAmount(e.target.value)}
+                      className="bg-[#0a0a0f] border-[#2a2a3a] text-white text-lg py-3"
+                    />
+                  </div>
+                </div>
+              </Card>
+
+              {/* Payment Proof Upload */}
+              <Card className="bg-[#1a1a24] border-[#2a2a3a] p-6">
+                <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+                  <Upload className="w-5 h-5 text-blue-400" />
+                  Step 3: Upload Payment Proof
+                </h2>
+                <div className="bg-[#0a0a0f] border-2 border-dashed border-[#2a2a3a] rounded-lg p-8 text-center cursor-pointer hover:border-[#3a3a4a] transition-colors">
+                  <label className="cursor-pointer">
+                    <Input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setFile(e.target.files?.[0] || null)}
+                      className="hidden"
+                    />
+                    {file ? (
+                      <div>
+                        <div className="text-2xl mb-2">✅</div>
+                        <p className="text-white font-semibold">{file.name}</p>
+                        <p className="text-gray-400 text-sm">{(file.size / 1024).toFixed(2)} KB</p>
+                      </div>
+                    ) : (
+                      <div>
+                        <div className="text-4xl mb-3">📸</div>
+                        <p className="text-white font-semibold">Click to upload screenshot</p>
+                        <p className="text-gray-400 text-sm">or drag & drop</p>
+                        <p className="text-gray-500 text-xs mt-2">PNG, JPG, JPEG, GIF (Max 10MB)</p>
+                      </div>
+                    )}
+                  </label>
+                </div>
+              </Card>
+
+              {/* Optional Description */}
+              <Card className="bg-[#1a1a24] border-[#2a2a3a] p-6">
+                <h2 className="text-xl font-bold text-white mb-4">Step 4: Additional Notes (Optional)</h2>
+                <Textarea
+                  placeholder="e.g., Purchased 1,370 coins via PayPal on Jan 15"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  className="bg-[#0a0a0f] border-[#2a2a3a] text-white min-h-24"
+                />
+              </Card>
+
+              {/* Submit Button */}
+              <motion.div
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
               >
-                {submitting ? "Submitting..." : "Submit & Message Admin"}
-              </Button>
-            </div>
-          </form>
-        </Card>
+                <Button
+                  type="submit"
+                  disabled={submitting || !file || !coinAmount || !usdAmount || !paymentAccount}
+                  className="w-full py-6 text-lg font-bold bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {submitting ? "Processing..." : "Submit Payment Request"}
+                </Button>
+              </motion.div>
+            </form>
+          </motion.div>
+
+          {/* Sidebar - Info */}
+          <motion.div
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="space-y-4"
+          >
+            {/* Summary Card */}
+            <Card className="bg-gradient-to-br from-purple-900/50 to-pink-900/50 border-purple-500/50 p-6 sticky top-6">
+              <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
+                <Coins className="w-5 h-5 text-yellow-400" />
+                Summary
+              </h3>
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-400">Coins:</span>
+                  <span className="text-2xl font-bold text-yellow-400">{coinAmount || "0"}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-400">USD Amount:</span>
+                  <span className="text-2xl font-bold text-green-400">${usdAmount || "0.00"}</span>
+                </div>
+                <div className="bg-[#0a0a0f] rounded-lg p-3 mt-4 border border-[#2a2a3a]">
+                  <p className="text-gray-500 text-xs mb-1">Rate:</p>
+                  <p className="text-white font-semibold">
+                    {usdAmount && coinAmount
+                      ? (parseInt(coinAmount) / parseFloat(usdAmount)).toFixed(0)
+                      : "0"}{" "}
+                    coins per $1
+                  </p>
+                </div>
+              </div>
+            </Card>
+
+            {/* Process Info */}
+            <Card className="bg-[#1a1a24] border-[#2a2a3a] p-6">
+              <h3 className="text-lg font-bold text-white mb-4">How It Works</h3>
+              <div className="space-y-3 text-sm">
+                <div className="flex gap-3">
+                  <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500 flex items-center justify-center flex-shrink-0">
+                    <span className="text-purple-400 font-bold text-xs">1</span>
+                  </div>
+                  <div>
+                    <p className="text-white font-semibold">Choose Method</p>
+                    <p className="text-gray-500 text-xs">Select your payment method (we'll show you where to send payment)</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500 flex items-center justify-center flex-shrink-0">
+                    <span className="text-purple-400 font-bold text-xs">2</span>
+                  </div>
+                  <div>
+                    <p className="text-white font-semibold">Send Payment</p>
+                    <p className="text-gray-500 text-xs">Send funds to the specified payment account</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500 flex items-center justify-center flex-shrink-0">
+                    <span className="text-purple-400 font-bold text-xs">3</span>
+                  </div>
+                  <div>
+                    <p className="text-white font-semibold">Your Account Info</p>
+                    <p className="text-gray-500 text-xs">Enter your account info so we can verify it was from you</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500 flex items-center justify-center flex-shrink-0">
+                    <span className="text-purple-400 font-bold text-xs">4</span>
+                  </div>
+                  <div>
+                    <p className="text-white font-semibold">Upload Proof</p>
+                    <p className="text-gray-500 text-xs">Screenshot showing payment sent</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <div className="w-6 h-6 rounded-full bg-purple-500/20 border border-purple-500 flex items-center justify-center flex-shrink-0">
+                    <span className="text-purple-400 font-bold text-xs">5</span>
+                  </div>
+                  <div>
+                    <p className="text-white font-semibold">Admin Reviews</p>
+                    <p className="text-gray-500 text-xs">Within 24-48 hours</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <div className="w-6 h-6 rounded-full bg-green-500/20 border border-green-500 flex items-center justify-center flex-shrink-0">
+                    <span className="text-green-400 font-bold text-xs">✓</span>
+                  </div>
+                  <div>
+                    <p className="text-white font-semibold">Coins Added</p>
+                    <p className="text-gray-500 text-xs">Instantly credited to account</p>
+                  </div>
+                </div>
+              </div>
+            </Card>
+
+            {/* Warning */}
+            <Card className="bg-yellow-500/10 border-yellow-500/30 p-4">
+              <div className="flex gap-2">
+                <AlertCircle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-yellow-300 text-sm font-semibold">Admin Review Required</p>
+                  <p className="text-yellow-200 text-xs mt-1">
+                    Payment requests are manually reviewed by admins. Please be patient while we verify your payment proof.
+                  </p>
+                </div>
+              </div>
+            </Card>
+          </motion.div>
+        </div>
       </div>
     </div>
   );
